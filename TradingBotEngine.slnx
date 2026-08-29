@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="TradingBotEngine.API/TradingBotEngine.API.csproj" />
+  <Project Path="TradingBotEngine.Core/TradingBotEngine.Core.csproj" />
+  <Project Path="TradingBotEngine.Data/TradingBotEngine.Data.csproj" />
+  <Project Path="TradingBotEngine.Services/TradingBotEngine.Services.csproj" />
+  <Project Path="TradingBotEngine.Tests/TradingBotEngine.Tests.csproj" />
+</Solution>
