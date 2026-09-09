@@ -20,6 +20,11 @@ namespace TradingBotEngine.Data
         public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
         public DbSet<TrackedSymbol> TrackedSymbols => Set<TrackedSymbol>();
 
+        // Exchange order reconciliation
+        public DbSet<ExchangeOrder> ExchangeOrders => Set<ExchangeOrder>();
+        public DbSet<ExchangeFill> ExchangeFills => Set<ExchangeFill>();
+
+public DbSet<ExchangeBalance> ExchangeBalances => Set<ExchangeBalance>();
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
@@ -41,6 +46,14 @@ namespace TradingBotEngine.Data
 
             modelBuilder.Entity<BrokerConnection>()
                 .HasIndex(b => new { b.UserId, b.IsActive });
+
+            modelBuilder.Entity<BrokerConnection>()
+                .Property(b => b.IsTestnet)
+                .HasDefaultValue(true);
+
+            modelBuilder.Entity<BrokerConnection>()
+                .Property(b => b.IsLiveTradingEnabled)
+                .HasDefaultValue(false);
 
             modelBuilder.Entity<RefreshToken>()
                 .HasIndex(t => t.TokenHash)
@@ -114,6 +127,10 @@ namespace TradingBotEngine.Data
             modelBuilder.Entity<Payment>()
                 .HasIndex(p => new { p.UserId, p.CreatedAt });
 
+            modelBuilder.Entity<Payment>()
+                .HasIndex(p => new { p.Gateway, p.TransactionId })
+                .IsUnique();
+
             modelBuilder.Entity<RiskSetting>()
                 .HasOne(r => r.User)
                 .WithOne(u => u.RiskSetting)
@@ -145,6 +162,42 @@ namespace TradingBotEngine.Data
 
             modelBuilder.Entity<TrackedSymbol>()
                 .HasIndex(s => new { s.UserId, s.IsEnabled });
+
+            // ============================================================
+            // Exchange order reconciliation
+            // ============================================================
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasOne(e => e.User)
+                .WithMany()
+                .HasForeignKey(e => e.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasOne(e => e.Trade)
+                .WithMany()
+                .HasForeignKey(e => e.TradeId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasIndex(e => new { e.UserId, e.ExchangeOrderId })
+                .IsUnique();
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasIndex(e => new { e.UserId, e.Status });
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasIndex(e => new { e.UserId, e.Symbol, e.Status });
+
+            modelBuilder.Entity<ExchangeFill>()
+                .HasOne(e => e.ExchangeOrder)
+                .WithMany(e => e.Fills)
+                .HasForeignKey(e => e.ExchangeOrderId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<ExchangeFill>()
+                .HasIndex(e => new { e.ExchangeOrderId, e.ExchangeFillId })
+                .IsUnique();
         }
     }
 }

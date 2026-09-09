@@ -15,3 +15,4 @@ C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Services\o
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Services\obj\Debug\net8.0\refint\TradingBotEngine.Services.dll
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Services\obj\Debug\net8.0\TradingBotEngine.Services.pdb
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Services\obj\Debug\net8.0\ref\TradingBotEngine.Services.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Services\obj\Debug\net8.0\TradingBotEngine.Services.sourcelink.json

@@ -276,3 +276,11 @@ C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\obj\
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\obj\Debug\net8.0\TradingBotEngine.Tests.pdb
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\obj\Debug\net8.0\TradingBotEngine.Tests.genruntimeconfig.cache
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\obj\Debug\net8.0\ref\TradingBotEngine.Tests.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\obj\Debug\net8.0\TradingBotEngine.Tests.sourcelink.json
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.EntityFrameworkCore.InMemory.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.Extensions.Caching.Memory.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.Extensions.DependencyInjection.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.Extensions.Logging.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.Extensions.Logging.Abstractions.dll
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Tests\bin\Debug\net8.0\Microsoft.Extensions.Options.dll

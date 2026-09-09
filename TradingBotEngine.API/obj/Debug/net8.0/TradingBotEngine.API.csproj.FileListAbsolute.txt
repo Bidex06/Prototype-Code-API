@@ -261,3 +261,4 @@ C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\De
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\ref\TradingBotEngine.API.dll
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\package-lock.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\package.json
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.sourcelink.json

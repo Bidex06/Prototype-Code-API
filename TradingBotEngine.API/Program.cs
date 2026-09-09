@@ -43,6 +43,7 @@ builder.Services.AddSingleton<ICredentialProtector, CredentialProtector>();
 
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<BrokerService>();
+builder.Services.AddScoped<IReconciliationService, ReconciliationService>();
 builder.Services.AddScoped<IndicatorCalculator>();
 builder.Services.AddScoped<SignalGenerator>();
 builder.Services.AddHostedService<AutoTradeService>();
