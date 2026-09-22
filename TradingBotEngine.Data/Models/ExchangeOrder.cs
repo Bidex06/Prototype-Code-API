@@ -45,6 +45,13 @@ namespace TradingBotEngine.Data.Models
 
 
         public bool IsFutures { get; set; }
+
+        [Required, MaxLength(20)]
+        public string OrderRole { get; set; } = "Entry";
+
+        public int? ParentExchangeOrderId { get; set; }
+
+        public ExchangeOrder? ParentExchangeOrder { get; set; }
         
 
         [MaxLength(500)]

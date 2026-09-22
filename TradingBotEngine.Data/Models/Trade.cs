@@ -29,10 +29,10 @@ namespace TradingBotEngine.Data.Models
         public decimal? ProfitLoss { get; set; }
         public decimal? ProfitLossPercentage { get; set; }
         
-        [MaxLength(20)]
+        [MaxLength(100)]
         public string Status { get; set; }  // "Open", "Closed", "Cancelled"
         
-        [MaxLength(50)]
+        [MaxLength(500)]
         public string? Reason { get; set; }  // Why the trade was entered
         public string? Notes { get; set; }
         
@@ -42,6 +42,15 @@ namespace TradingBotEngine.Data.Models
         public string? OrderId { get; set; }
         
         public string? IdempotencyKey { get; set; }
+
+        [MaxLength(100)]
+        public string? StopLossOrderId { get; set; }
+
+        [MaxLength(100)]
+        public string? TakeProfitOrderId { get; set; }
+
+        [MaxLength(30)]
+        public string ProtectionStatus { get; set; } = "NotRequired";
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? UpdatedAt { get; set; }
     }

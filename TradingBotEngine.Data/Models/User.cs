@@ -37,6 +37,7 @@ namespace TradingBotEngine.Data.Models
         public ICollection<BrokerConnection> BrokerConnections { get; set; } = new List<BrokerConnection>();
         public ICollection<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
         public ICollection<TrackedSymbol> TrackedSymbols { get; set; } = new List<TrackedSymbol>();
+        public ICollection<TradingBot> TradingBots { get; set; } = new List<TradingBot>();
         public RiskSetting RiskSetting { get; set; } = null!;
 
         public long? TelegramChatId { get; set; }

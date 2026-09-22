@@ -6,9 +6,11 @@ namespace TradingBotEngine.Services
     {
         Task<bool> ReconcileOrderAsync(
             int userId,
-            int exchangeOrderId);
+            int exchangeOrderId,
+            CancellationToken cancellationToken = default);
 
         Task<int> ReconcilePendingOrdersAsync(
-            int userId);
+            int userId,
+            CancellationToken cancellationToken = default);
     }
 }

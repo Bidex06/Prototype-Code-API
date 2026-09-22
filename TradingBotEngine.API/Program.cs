@@ -38,14 +38,16 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
+builder.Services.AddMemoryCache();
 builder.Services.AddDataProtection();
 builder.Services.AddSingleton<ICredentialProtector, CredentialProtector>();
 
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<BrokerService>();
-builder.Services.AddScoped<IReconciliationService, ReconciliationService>();
+builder.Services.AddScoped<ExchangeMarketDataService>();
 builder.Services.AddScoped<IndicatorCalculator>();
 builder.Services.AddScoped<SignalGenerator>();
+builder.Services.AddScoped<IReconciliationService, ReconciliationService>();
 builder.Services.AddHostedService<AutoTradeService>();
 
 builder.Services.AddScoped<TelegramCommandHandler>();

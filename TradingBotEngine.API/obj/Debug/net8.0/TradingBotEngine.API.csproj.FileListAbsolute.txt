@@ -1,5 +1,7 @@
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\appsettings.Development.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\appsettings.json
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\package-lock.json
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\package.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\TradingBotEngine.API.staticwebassets.endpoints.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\TradingBotEngine.API.exe
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\TradingBotEngine.API.deps.json
@@ -244,6 +246,7 @@ C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\De
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.csproj.CoreCompileInputs.cache
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.MvcApplicationPartsAssemblyInfo.cs
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.MvcApplicationPartsAssemblyInfo.cache
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.sourcelink.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\rjimswa.dswa.cache.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\rjsmrazor.dswa.cache.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\rjsmcshtml.dswa.cache.json
@@ -259,6 +262,3 @@ C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\De
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.pdb
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.genruntimeconfig.cache
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\ref\TradingBotEngine.API.dll
-C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\package-lock.json
-C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\bin\Debug\net8.0\package.json
-C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.API\obj\Debug\net8.0\TradingBotEngine.API.sourcelink.json

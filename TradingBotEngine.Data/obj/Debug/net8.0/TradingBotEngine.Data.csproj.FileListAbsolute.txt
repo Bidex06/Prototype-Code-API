@@ -8,9 +8,9 @@ C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\D
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.AssemblyInfoInputs.cache
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.AssemblyInfo.cs
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.csproj.CoreCompileInputs.cache
+C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.sourcelink.json
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingB.363787E8.Up2Date
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.dll
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\refint\TradingBotEngine.Data.dll
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.pdb
 C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\ref\TradingBotEngine.Data.dll
-C:\Users\DELL\Desktop\Code\TradingBot Engine Backend\TradingBotEngine.Data\obj\Debug\net8.0\TradingBotEngine.Data.sourcelink.json

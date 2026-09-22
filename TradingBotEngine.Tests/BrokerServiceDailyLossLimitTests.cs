@@ -35,7 +35,8 @@ public class BrokerServiceDailyLossLimitTests
         public override Task<decimal> GetBalanceAsync(
             int userId,
             string currency = "USDT",
-            bool useFutures = false)
+            bool useFutures = false,
+            int? connectionId = null)
         {
             return Task.FromResult(100m);
         }

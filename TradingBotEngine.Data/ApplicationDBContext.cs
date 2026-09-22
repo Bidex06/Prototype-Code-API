@@ -19,6 +19,8 @@ namespace TradingBotEngine.Data
         public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
         public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
         public DbSet<TrackedSymbol> TrackedSymbols => Set<TrackedSymbol>();
+        public DbSet<TradingBot> TradingBots => Set<TradingBot>();
+        public DbSet<TradingBotTrackedSymbol> TradingBotTrackedSymbols => Set<TradingBotTrackedSymbol>();
 
         // Exchange order reconciliation
         public DbSet<ExchangeOrder> ExchangeOrders => Set<ExchangeOrder>();
@@ -163,6 +165,40 @@ public DbSet<ExchangeBalance> ExchangeBalances => Set<ExchangeBalance>();
             modelBuilder.Entity<TrackedSymbol>()
                 .HasIndex(s => new { s.UserId, s.IsEnabled });
 
+            modelBuilder.Entity<TradingBot>()
+                .HasOne(b => b.User)
+                .WithMany(u => u.TradingBots)
+                .HasForeignKey(b => b.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<TradingBot>()
+                .HasOne(b => b.BrokerConnection)
+                .WithMany()
+                .HasForeignKey(b => b.BrokerConnectionId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            modelBuilder.Entity<TradingBot>()
+                .HasIndex(b => new { b.UserId, b.Name })
+                .IsUnique();
+
+            modelBuilder.Entity<TradingBot>()
+                .HasIndex(b => new { b.UserId, b.IsEnabled, b.IsRunning });
+
+            modelBuilder.Entity<TradingBotTrackedSymbol>()
+                .HasKey(x => new { x.TradingBotId, x.TrackedSymbolId });
+
+            modelBuilder.Entity<TradingBotTrackedSymbol>()
+                .HasOne(x => x.TradingBot)
+                .WithMany(b => b.TrackedSymbols)
+                .HasForeignKey(x => x.TradingBotId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<TradingBotTrackedSymbol>()
+                .HasOne(x => x.TrackedSymbol)
+                .WithMany()
+                .HasForeignKey(x => x.TrackedSymbolId)
+                .OnDelete(DeleteBehavior.Cascade);
+
             // ============================================================
             // Exchange order reconciliation
             // ============================================================
@@ -188,6 +224,15 @@ public DbSet<ExchangeBalance> ExchangeBalances => Set<ExchangeBalance>();
 
             modelBuilder.Entity<ExchangeOrder>()
                 .HasIndex(e => new { e.UserId, e.Symbol, e.Status });
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasOne(e => e.ParentExchangeOrder)
+                .WithMany()
+                .HasForeignKey(e => e.ParentExchangeOrderId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<ExchangeOrder>()
+                .HasIndex(e => new { e.TradeId, e.OrderRole });
 
             modelBuilder.Entity<ExchangeFill>()
                 .HasOne(e => e.ExchangeOrder)

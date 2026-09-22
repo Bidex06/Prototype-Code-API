@@ -22,6 +22,11 @@ namespace TradingBotEngine.Data.Models
         public decimal DailyLossLimit { get; set; }  // 5% default
         public decimal MaxDrawdown { get; set; }  // 10% default
 
+        public bool IsEmergencyKillSwitch{get; set;}
+
+public DateTime? EmergencyKillSwitchActivatedAt { get; set; }
+
+
 public decimal EquityHighWaterMark { get; set; }
 public DateTime? EquityHighWaterMarkUpdatedAt { get; set; }
 

@@ -251,10 +251,18 @@ namespace TradingBotEngine.Data.Migrations
                     b.Property<DateTime?>("LastReconciledAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("OrderRole")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
                     b.Property<string>("OrderType")
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
+
+                    b.Property<int?>("ParentExchangeOrderId")
+                        .HasColumnType("integer");
 
                     b.Property<decimal>("RequestedQuantity")
                         .HasColumnType("numeric");
@@ -285,7 +293,9 @@ namespace TradingBotEngine.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TradeId");
+                    b.HasIndex("ParentExchangeOrderId");
+
+                    b.HasIndex("TradeId", "OrderRole");
 
                     b.HasIndex("UserId", "ExchangeOrderId")
                         .IsUnique();
@@ -466,6 +476,9 @@ namespace TradingBotEngine.Data.Migrations
                     b.Property<decimal>("DailyLossLimit")
                         .HasColumnType("numeric");
 
+                    b.Property<DateTime?>("EmergencyKillSwitchActivatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<decimal>("EquityHighWaterMark")
                         .HasColumnType("numeric");
 
@@ -474,6 +487,9 @@ namespace TradingBotEngine.Data.Migrations
 
                     b.Property<decimal?>("FixedLotSize")
                         .HasColumnType("numeric");
+
+                    b.Property<bool>("IsEmergencyKillSwitch")
+                        .HasColumnType("boolean");
 
                     b.Property<decimal>("Leverage")
                         .HasColumnType("numeric");
@@ -729,20 +745,29 @@ namespace TradingBotEngine.Data.Migrations
                     b.Property<decimal?>("ProfitLossPercentage")
                         .HasColumnType("numeric");
 
+                    b.Property<string>("ProtectionStatus")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
+
                     b.Property<decimal>("Quantity")
                         .HasColumnType("numeric");
 
                     b.Property<string>("Reason")
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<string>("Status")
                         .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<decimal?>("StopLoss")
                         .HasColumnType("numeric");
+
+                    b.Property<string>("StopLossOrderId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<string>("Symbol")
                         .IsRequired()
@@ -751,6 +776,10 @@ namespace TradingBotEngine.Data.Migrations
 
                     b.Property<decimal?>("TakeProfit")
                         .HasColumnType("numeric");
+
+                    b.Property<string>("TakeProfitOrderId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -769,6 +798,83 @@ namespace TradingBotEngine.Data.Migrations
                     b.HasIndex("UserId", "Symbol", "OrderId");
 
                     b.ToTable("Trades");
+                });
+
+            modelBuilder.Entity("TradingBotEngine.Data.Models.TradingBot", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("BrokerConnectionId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsRunning")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("LastStartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastStoppedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Strategy")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Timeframe")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("UseFutures")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BrokerConnectionId");
+
+                    b.HasIndex("UserId", "Name")
+                        .IsUnique();
+
+                    b.HasIndex("UserId", "IsEnabled", "IsRunning");
+
+                    b.ToTable("TradingBots");
+                });
+
+            modelBuilder.Entity("TradingBotEngine.Data.Models.TradingBotTrackedSymbol", b =>
+                {
+                    b.Property<int>("TradingBotId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("TrackedSymbolId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("TradingBotId", "TrackedSymbolId");
+
+                    b.HasIndex("TrackedSymbolId");
+
+                    b.ToTable("TradingBotTrackedSymbols");
                 });
 
             modelBuilder.Entity("TradingBotEngine.Data.Models.User", b =>
@@ -881,6 +987,11 @@ namespace TradingBotEngine.Data.Migrations
 
             modelBuilder.Entity("TradingBotEngine.Data.Models.ExchangeOrder", b =>
                 {
+                    b.HasOne("TradingBotEngine.Data.Models.ExchangeOrder", "ParentExchangeOrder")
+                        .WithMany()
+                        .HasForeignKey("ParentExchangeOrderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("TradingBotEngine.Data.Models.Trade", "Trade")
                         .WithMany()
                         .HasForeignKey("TradeId")
@@ -892,6 +1003,8 @@ namespace TradingBotEngine.Data.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("ParentExchangeOrder");
 
                     b.Navigation("Trade");
 
@@ -993,9 +1106,51 @@ namespace TradingBotEngine.Data.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("TradingBotEngine.Data.Models.TradingBot", b =>
+                {
+                    b.HasOne("TradingBotEngine.Data.Models.BrokerConnection", "BrokerConnection")
+                        .WithMany()
+                        .HasForeignKey("BrokerConnectionId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("TradingBotEngine.Data.Models.User", "User")
+                        .WithMany("TradingBots")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("BrokerConnection");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("TradingBotEngine.Data.Models.TradingBotTrackedSymbol", b =>
+                {
+                    b.HasOne("TradingBotEngine.Data.Models.TrackedSymbol", "TrackedSymbol")
+                        .WithMany()
+                        .HasForeignKey("TrackedSymbolId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("TradingBotEngine.Data.Models.TradingBot", "TradingBot")
+                        .WithMany("TrackedSymbols")
+                        .HasForeignKey("TradingBotId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("TrackedSymbol");
+
+                    b.Navigation("TradingBot");
+                });
+
             modelBuilder.Entity("TradingBotEngine.Data.Models.ExchangeOrder", b =>
                 {
                     b.Navigation("Fills");
+                });
+
+            modelBuilder.Entity("TradingBotEngine.Data.Models.TradingBot", b =>
+                {
+                    b.Navigation("TrackedSymbols");
                 });
 
             modelBuilder.Entity("TradingBotEngine.Data.Models.User", b =>
@@ -1017,6 +1172,8 @@ namespace TradingBotEngine.Data.Migrations
                     b.Navigation("TrackedSymbols");
 
                     b.Navigation("Trades");
+
+                    b.Navigation("TradingBots");
                 });
 #pragma warning restore 612, 618
         }

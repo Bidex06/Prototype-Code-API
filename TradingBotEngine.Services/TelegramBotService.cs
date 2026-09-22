@@ -8,122 +8,199 @@ using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
-namespace TradingBotEngine.Services
+namespace TradingBotEngine.Services;
+
+public class TelegramBotService : BackgroundService
 {
-    public class TelegramBotService : BackgroundService
+    private readonly ITelegramBotClient? _botClient;
+    private readonly ILogger<TelegramBotService> _logger;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly bool _isEnabled;
+
+    public TelegramBotService(
+        IConfiguration configuration,
+        ILogger<TelegramBotService> logger,
+        IServiceProvider serviceProvider)
     {
-        private readonly ITelegramBotClient? _botClient;
-        private readonly ILogger<TelegramBotService> _logger;
-        private readonly IServiceProvider _serviceProvider;
-        private readonly bool _isEnabled;
+        _logger = logger;
+        _serviceProvider = serviceProvider;
 
-        public TelegramBotService(
-            IConfiguration configuration,
-            ILogger<TelegramBotService> logger,
-            IServiceProvider serviceProvider)
+        var token = configuration["Telegram:BotToken"];
+
+        if (string.IsNullOrWhiteSpace(token) ||
+            token.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase))
         {
-            _logger = logger;
-            _serviceProvider = serviceProvider;
-
-            var token = configuration["Telegram:BotToken"];
-            if (string.IsNullOrWhiteSpace(token) || token.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogWarning("Telegram bot is disabled because no valid bot token is configured.");
-                _isEnabled = false;
-                return;
-            }
-
-            _botClient = new TelegramBotClient(token);
-            _isEnabled = true;
+            _logger.LogWarning(
+                "Telegram bot is disabled because no valid bot token is configured.");
+            _isEnabled = false;
+            return;
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        _botClient = new TelegramBotClient(token);
+        _isEnabled = true;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (!_isEnabled || _botClient == null)
+            return;
+
+        _logger.LogInformation("Telegram bot service is starting.");
+
+        var receiverOptions = new ReceiverOptions
         {
-            if (!_isEnabled || _botClient == null)
-                return;
+            AllowedUpdates = new[] { UpdateType.Message },
+            ThrowPendingUpdates = true
+        };
 
-            _logger.LogInformation("Telegram bot service is starting.");
+        var retryDelay = TimeSpan.FromSeconds(5);
+        const int maxRetryDelaySeconds = 60;
 
-            var receiverOptions = new ReceiverOptions
-            {
-                AllowedUpdates = new[] { UpdateType.Message },
-                ThrowPendingUpdates = true
-            };
-
-            var me = await _botClient.GetMeAsync(stoppingToken);
-            _logger.LogInformation("Telegram bot started: @{Username}", me.Username);
-
-            _botClient.StartReceiving(
-                HandleUpdateAsync,
-                HandleErrorAsync,
-                receiverOptions,
-                stoppingToken);
-
+        while (!stoppingToken.IsCancellationRequested)
+        {
             try
             {
+                var me = await _botClient.GetMeAsync(stoppingToken);
+
+                _logger.LogInformation(
+                    "Telegram bot started: @{Username}",
+                    me.Username);
+
+                _botClient.StartReceiving(
+                    HandleUpdateAsync,
+                    HandleErrorAsync,
+                    receiverOptions,
+                    stoppingToken);
+
                 await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                // Normal shutdown.
-            }
-        }
-
-        private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
-        {
-            if (update.Message is not { } message || message.Text is not { } messageText)
-                return;
-
-            try
-            {
-                // Never log raw Telegram message text. It may contain credentials or other secrets.
-                var commandName = messageText.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "<empty>";
-                _logger.LogInformation("Received Telegram command {Command} from chat {ChatId}.", commandName, message.Chat.Id);
-
-                using var scope = _serviceProvider.CreateScope();
-                var handler = scope.ServiceProvider.GetRequiredService<TelegramCommandHandler>();
-                var response = await handler.HandleCommandAsync(
-                    message.Chat.Id,
-                    message.Chat.Username ?? "Unknown",
-                    messageText,
-                    message);
-
-                if (!string.IsNullOrWhiteSpace(response))
-                    await botClient.SendTextMessageAsync(message.Chat.Id, response, cancellationToken: cancellationToken);
+                break;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error handling Telegram command for chat {ChatId}.", message.Chat.Id);
+                _logger.LogWarning(
+                    ex,
+                    "Telegram service could not connect to Telegram. The API will remain running and Telegram will be retried in {RetryDelaySeconds} seconds.",
+                    retryDelay.TotalSeconds);
+
+                try
+                {
+                    await Task.Delay(retryDelay, stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                retryDelay = TimeSpan.FromSeconds(
+                    Math.Min(retryDelay.TotalSeconds * 2, maxRetryDelaySeconds));
+            }
+        }
+
+        _logger.LogInformation("Telegram bot service stopped.");
+    }
+
+    private async Task HandleUpdateAsync(
+        ITelegramBotClient botClient,
+        Update update,
+        CancellationToken cancellationToken)
+    {
+        if (update.Message is not { } message || message.Text is not { } messageText)
+            return;
+
+        try
+        {
+            // Never log raw Telegram message text. It may contain credentials or other secrets.
+            var commandName = messageText
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault() ?? "<empty>";
+
+            _logger.LogInformation(
+                "Received Telegram command {Command} from chat {ChatId}.",
+                commandName,
+                message.Chat.Id);
+
+            using var scope = _serviceProvider.CreateScope();
+
+            var handler = scope.ServiceProvider
+                .GetRequiredService<TelegramCommandHandler>();
+
+            var response = await handler.HandleCommandAsync(
+                message.Chat.Id,
+                message.Chat.Username ?? "Unknown",
+                messageText,
+                message);
+
+            if (!string.IsNullOrWhiteSpace(response))
+            {
+                await botClient.SendTextMessageAsync(
+                    message.Chat.Id,
+                    response,
+                    cancellationToken: cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Error handling Telegram command for chat {ChatId}.",
+                message.Chat.Id);
+
+            try
+            {
                 await botClient.SendTextMessageAsync(
                     message.Chat.Id,
                     "⚠️ The request could not be processed. Please use the web dashboard or try again later.",
                     cancellationToken: cancellationToken);
             }
+            catch (Exception sendException)
+            {
+                _logger.LogWarning(
+                    sendException,
+                    "Failed to send Telegram error response to chat {ChatId}.",
+                    message.Chat.Id);
+            }
+        }
+    }
+
+    private Task HandleErrorAsync(
+        ITelegramBotClient botClient,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        if (exception is ApiRequestException apiException)
+        {
+            _logger.LogError(
+                "Telegram API error {ErrorCode}.",
+                apiException.ErrorCode);
+        }
+        else
+        {
+            _logger.LogError(
+                exception,
+                "Unexpected Telegram service error.");
         }
 
-        private Task HandleErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
-        {
-            if (exception is ApiRequestException apiException)
-                _logger.LogError("Telegram API error {ErrorCode}.", apiException.ErrorCode);
-            else
-                _logger.LogError(exception, "Unexpected Telegram service error.");
+        return Task.CompletedTask;
+    }
 
-            return Task.CompletedTask;
+    public async Task SendAlertAsync(long chatId, string message)
+    {
+        if (!_isEnabled || _botClient == null)
+            return;
+
+        try
+        {
+            await _botClient.SendTextMessageAsync(chatId, message);
         }
-
-        public async Task SendAlertAsync(long chatId, string message)
+        catch (Exception ex)
         {
-            if (!_isEnabled || _botClient == null)
-                return;
-
-            try
-            {
-                await _botClient.SendTextMessageAsync(chatId, message);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to send Telegram alert to chat {ChatId}.", chatId);
-            }
+            _logger.LogError(
+                ex,
+                "Failed to send Telegram alert to chat {ChatId}.",
+                chatId);
         }
     }
 }

@@ -5,7 +5,7 @@ namespace TradingBotEngine.Core
 {
     public class IndicatorCalculator
     {
-        public async Task<Dictionary<string, object>> CalculateIndicators(
+        public Task<Dictionary<string, object>> CalculateIndicators(
             List<Candle> candles,
             Dictionary<string, object>? parameters = null)
         {
@@ -69,12 +69,14 @@ namespace TradingBotEngine.Core
             indicators["Resistance"] = resistance;
 
             // Trend
-            indicators["Trend"] = DetermineTrend(candles, (decimal)indicators["MA50"], (decimal)indicators["MA200"]);
+            var ma50 = Convert.ToDecimal(indicators["MA50"], System.Globalization.CultureInfo.InvariantCulture);
+            var ma200 = Convert.ToDecimal(indicators["MA200"], System.Globalization.CultureInfo.InvariantCulture);
+            indicators["Trend"] = DetermineTrend(candles, ma50, ma200);
 
             // Pattern
             indicators["Pattern"] = DetectPattern(candles, quotes);
 
-            return indicators;
+            return Task.FromResult(indicators);
         }
 
         private (decimal Support, decimal Resistance) FindSupportAndResistance(List<Candle> candles)
