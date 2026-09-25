@@ -77,7 +77,7 @@ public sealed class BotController : ControllerBase
         if (!user.IsActive)
             return BadRequest(new { message = "Account is deactivated." });
 
-        if (!HasActiveSubscription(user))
+        if (!SubscriptionGuard.HasActiveSubscription(user))
             return BadRequest(new { message = "An active subscription is required to create a trading bot." });
 
         var name = request.Name.Trim();
@@ -227,7 +227,7 @@ public sealed class BotController : ControllerBase
         if (user == null)
             return NotFound(new { message = "User not found." });
 
-        if (!HasActiveSubscription(user))
+       if (!SubscriptionGuard.HasActiveSubscription(user))
             return BadRequest(new { message = "An active subscription is required to start a trading bot." });
 
         var enabledSymbols = bot.TrackedSymbols

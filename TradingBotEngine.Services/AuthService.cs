@@ -42,7 +42,7 @@ namespace TradingBotEngine.Services
                 return Failure("Password must contain at least 12 characters, including upper-case, lower-case, a number, and a symbol.");
 
             var now = DateTime.UtcNow;
-            var trialEnd = now.AddDays(10);
+            var trialEnd = now.AddDays(15);
 
             var user = new User
             {
@@ -85,7 +85,7 @@ namespace TradingBotEngine.Services
             // The user must be persisted before a token is generated so the JWT contains the real DB id.
             await _context.SaveChangesAsync();
 
-            return await CreateSuccessResultAsync(user, subscription, "Registration successful! Your 10-day free trial has started.");
+            return await CreateSuccessResultAsync(user, subscription, "Registration successful! Your 15-day free trial has started.");
         }
 
         public async Task<AuthResult> LoginAsync(LoginRequest request)
@@ -101,9 +101,15 @@ namespace TradingBotEngine.Services
             if (!user.IsActive)
                 return Failure("Account is deactivated");
 
-            var subscriptionActive = await EnsureSubscriptionStateAsync(user.Subscription);
-            if (!subscriptionActive)
-                return Failure("Subscription expired. Please renew.");
+            // Login is allowed regardless of subscription status. Expired users
+            // can still sign in and see their account, but creating/starting a
+            // bot or placing a manual order is blocked separately by
+            // SubscriptionGuard in BotController and TradingController, and by
+            // AutoTradeService's per-cycle eligibility check for already-running
+            // bots. The line below still needs to run so a lapsed subscription's
+            // IsActive flag gets corrected in the DB even though it no longer
+            // gates login.
+            await EnsureSubscriptionStateAsync(user.Subscription);
 
             user.LastLoginAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();

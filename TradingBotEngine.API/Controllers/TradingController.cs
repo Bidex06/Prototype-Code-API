@@ -328,6 +328,19 @@ public sealed class TradingController : ControllerBase
         if (!ModelState.IsValid)
             return ValidationProblem(ModelState);
 
+        var user = await _context.Users
+            .Include(u => u.Subscription)
+            .FirstOrDefaultAsync(u => u.Id == userId);
+
+        if (user == null)
+            return NotFound(new { message = "User not found." });
+
+        if (!user.IsActive)
+            return BadRequest(new { message = "Account is deactivated." });
+
+        if (!SubscriptionGuard.HasActiveSubscription(user))
+            return BadRequest(new { message = SubscriptionGuard.ExpiredMessage });
+
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
             return BadRequest(new
