@@ -102,6 +102,12 @@ public sealed class BotController : ControllerBase
         if (broker.Error != null)
             return broker.Error;
 
+        var riskError = ValidateRiskManagementFields(
+            request.StopLossMode, request.StopLossPercent,
+            request.TakeProfitMode, request.TakeProfitPercent);
+        if (riskError != null)
+            return BadRequest(new { message = riskError });
+
         var bot = new TradingBot
         {
             UserId = userId,
@@ -112,7 +118,12 @@ public sealed class BotController : ControllerBase
             UseFutures = request.UseFutures,
             IsEnabled = true,
             IsRunning = false,
-            CreatedAt = DateTime.UtcNow
+            CreatedAt = DateTime.UtcNow,
+            AutoTradeEnabled = request.AutoTradeEnabled,
+            StopLossMode = request.StopLossMode,
+            StopLossPercent = request.StopLossMode == RiskManagementMode.Manual ? request.StopLossPercent : null,
+            TakeProfitMode = request.TakeProfitMode,
+            TakeProfitPercent = request.TakeProfitMode == RiskManagementMode.Manual ? request.TakeProfitPercent : null
         };
 
         foreach (var symbol in symbols)
@@ -176,12 +187,23 @@ public sealed class BotController : ControllerBase
         if (broker.Error != null)
             return broker.Error;
 
+        var riskError = ValidateRiskManagementFields(
+            request.StopLossMode, request.StopLossPercent,
+            request.TakeProfitMode, request.TakeProfitPercent);
+        if (riskError != null)
+            return BadRequest(new { message = riskError });
+
         bot.Name = name;
         bot.Strategy = strategy;
         bot.Timeframe = timeframe;
         bot.BrokerConnectionId = request.BrokerConnectionId;
         bot.UseFutures = request.UseFutures;
         bot.UpdatedAt = DateTime.UtcNow;
+        bot.AutoTradeEnabled = request.AutoTradeEnabled;
+        bot.StopLossMode = request.StopLossMode;
+        bot.StopLossPercent = request.StopLossMode == RiskManagementMode.Manual ? request.StopLossPercent : null;
+        bot.TakeProfitMode = request.TakeProfitMode;
+        bot.TakeProfitPercent = request.TakeProfitMode == RiskManagementMode.Manual ? request.TakeProfitPercent : null;
 
         _context.TradingBotTrackedSymbols.RemoveRange(bot.TrackedSymbols);
         bot.TrackedSymbols = symbolIds.Select(symbolId => new TradingBotTrackedSymbol
@@ -376,6 +398,19 @@ public sealed class BotController : ControllerBase
         user.Subscription.IsActive &&
         user.Subscription.EndDate > DateTime.UtcNow;
 
+    private static string? ValidateRiskManagementFields(
+        RiskManagementMode stopLossMode, decimal? stopLossPercent,
+        RiskManagementMode takeProfitMode, decimal? takeProfitPercent)
+    {
+        if (stopLossMode == RiskManagementMode.Manual && stopLossPercent is null)
+            return "Stop-loss percent is required when stop-loss mode is Manual.";
+
+        if (takeProfitMode == RiskManagementMode.Manual && takeProfitPercent is null)
+            return "Take-profit percent is required when take-profit mode is Manual.";
+
+        return null;
+    }
+
     private async Task AddAuditAsync(int userId, string action, string details)
     {
         _context.AuditLogs.Add(new AuditLog
@@ -415,7 +450,12 @@ public sealed class BotController : ControllerBase
                 IsEnabled = x.TrackedSymbol.IsEnabled
             })
             .OrderBy(x => x.Symbol)
-            .ToList()
+            .ToList(),
+        AutoTradeEnabled = bot.AutoTradeEnabled,
+        StopLossMode = bot.StopLossMode,
+        StopLossPercent = bot.StopLossPercent,
+        TakeProfitMode = bot.TakeProfitMode,
+        TakeProfitPercent = bot.TakeProfitPercent
     };
 
     private bool TryGetUserId(out int userId)

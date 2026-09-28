@@ -27,6 +27,22 @@ public class TradingBot
     public bool IsEnabled { get; set; } = true;
     public bool IsRunning { get; set; }
 
+    // Per-bot auto-execution override. This sits UNDERNEATH the existing
+    // User.IsAutoTradeEnabled global switch - both must be true for a bot
+    // to auto-execute. Defaults to true so existing bots keep behaving
+    // exactly as they did before this field existed (gated only by the
+    // user-level switch, as today).
+    public bool AutoTradeEnabled { get; set; } = true;
+
+    // Defaults to Auto for both legs so existing bots keep their current
+    // behavior unchanged: today every bot implicitly trusts the signal
+    // generator's own calculated stop-loss/take-profit.
+    public RiskManagementMode StopLossMode { get; set; } = RiskManagementMode.Auto;
+    public decimal? StopLossPercent { get; set; }
+
+    public RiskManagementMode TakeProfitMode { get; set; } = RiskManagementMode.Auto;
+    public decimal? TakeProfitPercent { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? UpdatedAt { get; set; }
     public DateTime? LastStartedAt { get; set; }

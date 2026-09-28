@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using TradingBotEngine.Data.Models;
 
 namespace TradingBotEngine.API.DTOs.Bot;
 
@@ -20,6 +21,20 @@ public sealed class CreateTradingBotRequestDto
 
     [Required, MinLength(1), MaxLength(50)]
     public List<int> TrackedSymbolIds { get; set; } = new();
+
+    // Per-bot auto-execution override (Option A: layered under the existing
+    // account-wide auto-trade switch, both must be true to auto-execute).
+    public bool AutoTradeEnabled { get; set; } = true;
+
+    public RiskManagementMode StopLossMode { get; set; } = RiskManagementMode.Auto;
+
+    [Range(0.1, 50, ErrorMessage = "Stop-loss percent must be between 0.1 and 50.")]
+    public decimal? StopLossPercent { get; set; }
+
+    public RiskManagementMode TakeProfitMode { get; set; } = RiskManagementMode.Auto;
+
+    [Range(0.1, 50, ErrorMessage = "Take-profit percent must be between 0.1 and 50.")]
+    public decimal? TakeProfitPercent { get; set; }
 }
 
 public sealed class UpdateTradingBotRequestDto
@@ -40,6 +55,18 @@ public sealed class UpdateTradingBotRequestDto
 
     [Required, MinLength(1), MaxLength(50)]
     public List<int> TrackedSymbolIds { get; set; } = new();
+
+    public bool AutoTradeEnabled { get; set; } = true;
+
+    public RiskManagementMode StopLossMode { get; set; } = RiskManagementMode.Auto;
+
+    [Range(0.1, 50, ErrorMessage = "Stop-loss percent must be between 0.1 and 50.")]
+    public decimal? StopLossPercent { get; set; }
+
+    public RiskManagementMode TakeProfitMode { get; set; } = RiskManagementMode.Auto;
+
+    [Range(0.1, 50, ErrorMessage = "Take-profit percent must be between 0.1 and 50.")]
+    public decimal? TakeProfitPercent { get; set; }
 }
 
 public sealed class TradingBotResponseDto
@@ -58,6 +85,12 @@ public sealed class TradingBotResponseDto
     public DateTime? LastStartedAt { get; set; }
     public DateTime? LastStoppedAt { get; set; }
     public List<TrackedBotSymbolResponseDto> TrackedSymbols { get; set; } = new();
+
+    public bool AutoTradeEnabled { get; set; }
+    public RiskManagementMode StopLossMode { get; set; }
+    public decimal? StopLossPercent { get; set; }
+    public RiskManagementMode TakeProfitMode { get; set; }
+    public decimal? TakeProfitPercent { get; set; }
 }
 
 public sealed class TrackedBotSymbolResponseDto

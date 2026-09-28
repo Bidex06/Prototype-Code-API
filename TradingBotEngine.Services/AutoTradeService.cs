@@ -381,14 +381,17 @@ public sealed class AutoTradeService : BackgroundService
             return;
         }
 
-        if (!IsValidExecutableSignal(signal))
+        var (resolvedStopLoss, resolvedTakeProfit) = ResolveProtectionLevels(bot, signal);
+
+        if (!IsValidExecutableSignal(signal, bot, resolvedStopLoss, resolvedTakeProfit))
         {
             await WriteAuditAsync(
                 db,
                 bot.UserId,
                 "AutoTradeSignalBlocked",
                 $"Bot {bot.Id} generated an invalid executable {signal.Action} signal for {symbol}. " +
-                "A valid protective stop-loss and take-profit are required before automated execution.",
+                "A valid protective stop-loss and take-profit are required before automated execution " +
+                "for any leg not set to None.",
                 cancellationToken);
 
             _logger.LogWarning(
@@ -427,8 +430,8 @@ public sealed class AutoTradeService : BackgroundService
             symbol: symbol,
             direction: signal.Action,
             orderType: isSpot ? "Limit" : "Market",
-            stopLoss: isSpotSell ? null : signal.StopLoss,
-            takeProfit: isSpotSell ? null : signal.TakeProfit,
+            stopLoss: isSpotSell ? null : resolvedStopLoss,
+            takeProfit: isSpotSell ? null : resolvedTakeProfit,
             entryPrice: isSpot ? signal.Price : null,
             useFutures: bot.UseFutures,
             idempotencyKey: idempotencyKey);
@@ -599,28 +602,75 @@ public sealed class AutoTradeService : BackgroundService
         }
     }
 
-    private static bool IsValidExecutableSignal(TradingSignal signal)
+    /// <summary>
+    /// Determines the actual stop-loss/take-profit levels to submit with the
+    /// order, based on each leg's per-bot mode:
+    ///   Auto   - trust the strategy/signal generator's own calculated level.
+    ///   Manual - override with the bot's configured percent off entry price.
+    ///            Falls back to the signal's own level if Manual was selected
+    ///            but no percent was actually configured, rather than silently
+    ///            guessing at a number nobody set.
+    ///   None   - no protective order for that leg at all (null).
+    /// </summary>
+    private static (decimal? StopLoss, decimal? TakeProfit) ResolveProtectionLevels(
+        TradingBot bot,
+        TradingSignal signal)
     {
-        if (signal == null ||
-            signal.Price <= 0m ||
-            signal.StopLoss is null ||
-            signal.TakeProfit is null ||
-            signal.StopLoss <= 0m ||
-            signal.TakeProfit <= 0m)
+        var isBuy = signal.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase);
+
+        decimal? stopLoss = bot.StopLossMode switch
         {
+            RiskManagementMode.None => null,
+            RiskManagementMode.Manual when bot.StopLossPercent is > 0m =>
+                isBuy
+                    ? signal.Price * (1 - bot.StopLossPercent.Value / 100m)
+                    : signal.Price * (1 + bot.StopLossPercent.Value / 100m),
+            _ => signal.StopLoss
+        };
+
+        decimal? takeProfit = bot.TakeProfitMode switch
+        {
+            RiskManagementMode.None => null,
+            RiskManagementMode.Manual when bot.TakeProfitPercent is > 0m =>
+                isBuy
+                    ? signal.Price * (1 + bot.TakeProfitPercent.Value / 100m)
+                    : signal.Price * (1 - bot.TakeProfitPercent.Value / 100m),
+            _ => signal.TakeProfit
+        };
+
+        return (stopLoss, takeProfit);
+    }
+
+    private static bool IsValidExecutableSignal(
+        TradingSignal signal,
+        TradingBot bot,
+        decimal? resolvedStopLoss,
+        decimal? resolvedTakeProfit)
+    {
+        if (signal == null || signal.Price <= 0m)
             return false;
-        }
+
+        var requiresStopLoss = bot.StopLossMode != RiskManagementMode.None;
+        var requiresTakeProfit = bot.TakeProfitMode != RiskManagementMode.None;
+
+        if (requiresStopLoss && (resolvedStopLoss is null || resolvedStopLoss <= 0m))
+            return false;
+
+        if (requiresTakeProfit && (resolvedTakeProfit is null || resolvedTakeProfit <= 0m))
+            return false;
 
         if (signal.Action.Equals("BUY", StringComparison.OrdinalIgnoreCase))
         {
-            return signal.StopLoss.Value < signal.Price &&
-                   signal.TakeProfit.Value > signal.Price;
+            if (requiresStopLoss && resolvedStopLoss!.Value >= signal.Price) return false;
+            if (requiresTakeProfit && resolvedTakeProfit!.Value <= signal.Price) return false;
+            return true;
         }
 
         if (signal.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase))
         {
-            return signal.StopLoss.Value > signal.Price &&
-                   signal.TakeProfit.Value < signal.Price;
+            if (requiresStopLoss && resolvedStopLoss!.Value <= signal.Price) return false;
+            if (requiresTakeProfit && resolvedTakeProfit!.Value >= signal.Price) return false;
+            return true;
         }
 
         return false;
@@ -796,6 +846,13 @@ public sealed class AutoTradeService : BackgroundService
         // Keep the existing user-level switch as a global safety gate.
         if (!bot.User.IsAutoTradeEnabled)
             return BotEligibilityResult.Blocked("user-level auto-trading is disabled");
+
+        // Per-bot override, layered underneath the user-level switch above.
+        // Both must be true for a bot to auto-execute - this lets a user run
+        // one bot on autopilot and another on manual-approval-only, without
+        // touching the account-wide master switch.
+        if (!bot.AutoTradeEnabled)
+            return BotEligibilityResult.Blocked("bot-level auto-trading is disabled");
 
         var subscription = bot.User.Subscription;
         if (subscription == null ||
