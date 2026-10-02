@@ -1,13 +1,31 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 using System.Security.Claims;
 using TradingBotEngine.Services;
 
 namespace TradingBotEngine.API.Controllers;
 
+/// <summary>Returns 404 for the controller outside the Development environment.</summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class DevelopmentOnlyAttribute : Attribute, IResourceFilter
+{
+    public void OnResourceExecuting(ResourceExecutingContext context)
+    {
+        var env = context.HttpContext.RequestServices.GetRequiredService<IWebHostEnvironment>();
+        if (!env.IsDevelopment())
+            context.Result = new NotFoundResult();
+    }
+
+    public void OnResourceExecuted(ResourceExecutedContext context)
+    {
+    }
+}
+
 [ApiController]
 [Route("api/testnet-cleanup")]
 [Authorize]
+[DevelopmentOnly]
 //[ApiExplorerSettings(IgnoreApi = true)]
 public sealed class TestnetCleanupController : ControllerBase
 {

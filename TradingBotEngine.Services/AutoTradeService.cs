@@ -30,6 +30,32 @@ public sealed class AutoTradeService : BackgroundService
     private static readonly TimeSpan MarketDataTimeout = TimeSpan.FromSeconds(20);
     private const int CandleLimit = 250;
 
+    // Wakes the worker immediately (called when a bot is created or started) so the
+    // first signal is evaluated and executed without waiting for the next interval.
+    private static readonly SemaphoreSlim WakeSignal = new(0, 1);
+
+    public static void RequestImmediateRun()
+    {
+        try
+        {
+            WakeSignal.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // a wake-up is already pending
+        }
+    }
+
+    // Spot cannot short. A spot SELL would only sell coins the account already holds
+    // and, with no stop-loss/take-profit, would never close. Keep this false so spot
+    // bots enter with BUY only and exit through the protection orders.
+    private static readonly bool AllowSpotSellWithoutPosition = false;
+
+    private static readonly string[] ActiveTradeStatuses =
+    {
+        "Pending", "Open", "New", "PartiallyFilled", "Filled", "PendingReconciliation"
+    };
+
     // Prevents re-processing the same closed candle repeatedly during one process lifetime.
     // BrokerService idempotency remains the durable safety net across restarts.
     private readonly Dictionary<string, DateTime> _lastProcessedCandle = new(StringComparer.OrdinalIgnoreCase);
@@ -60,9 +86,8 @@ public sealed class AutoTradeService : BackgroundService
             WorkerInterval.TotalSeconds,
             ReconciliationInterval.TotalSeconds);
 
-        // PeriodicTimer prevents overlapping cycles by design: the next tick is
-        // awaited only after the current cycle has completely finished.
-        using var timer = new PeriodicTimer(WorkerInterval);
+        // The next cycle only starts after the current one has finished, so cycles
+        // never overlap. The wait ends early when RequestImmediateRun() is called.
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -100,8 +125,21 @@ public sealed class AutoTradeService : BackgroundService
 
             try
             {
-                if (!await timer.WaitForNextTickAsync(stoppingToken))
-                    break;
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                var delayTask = Task.Delay(WorkerInterval, waitCts.Token);
+                var wakeTask = WakeSignal.WaitAsync(waitCts.Token);
+
+                await Task.WhenAny(delayTask, wakeTask);
+                waitCts.Cancel();
+
+                try
+                {
+                    await Task.WhenAll(delayTask, wakeTask);
+                }
+                catch (OperationCanceledException)
+                {
+                    // the losing wait was cancelled on purpose
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -403,6 +441,86 @@ public sealed class AutoTradeService : BackgroundService
             return;
         }
 
+        // One position at a time per symbol. An opposite signal closes the open position;
+        // a signal in the same direction is skipped instead of stacking more trades.
+        var spotSellSignal = !bot.UseFutures &&
+                             signal.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase);
+
+        var activeTrade = await db.Trades
+            .Where(t =>
+                t.UserId == bot.UserId &&
+                t.Symbol == symbol &&
+                t.BrokerName == broker.BrokerName &&
+                (t.BotId == bot.Id || t.BotId == null) &&
+                ActiveTradeStatuses.Contains(t.Status))
+            .OrderByDescending(t => t.EntryTime)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        string? skipReason = null;
+
+        if (activeTrade != null)
+        {
+            var oppositeSignal = !string.Equals(
+                activeTrade.Direction, signal.Action, StringComparison.OrdinalIgnoreCase);
+
+            if (oppositeSignal &&
+                string.Equals(activeTrade.Status, "Open", StringComparison.OrdinalIgnoreCase))
+            {
+                var closeResult = await brokerService.ClosePositionAsync(
+                    bot.UserId, activeTrade.Id, broker, bot.UseFutures);
+
+                await WriteAuditAsync(
+                    db,
+                    bot.UserId,
+                    closeResult.Success ? "AutoTradePositionClosing" : "AutoTradePositionCloseFailed",
+                    closeResult.Success
+                        ? $"Bot {bot.Id} is closing {symbol} trade {activeTrade.Id} after an opposite {signal.Action} signal. Exit order {closeResult.OrderId ?? "unknown"}."
+                        : $"Bot {bot.Id} could not close {symbol} trade {activeTrade.Id}: {closeResult.Error}",
+                    cancellationToken);
+
+                await PersistSignalAsync(
+                    db,
+                    bot.UserId,
+                    signal,
+                    wasExecuted: closeResult.Success,
+                    tradeId: activeTrade.Id,
+                    cancellationToken: cancellationToken);
+
+                if (closeResult.Success)
+                    await ReconcileUserNowAsync(bot.UserId, cancellationToken);
+
+                MarkCandleProcessed(processKey, latestClosedCandle.Timestamp);
+                return;
+            }
+
+            skipReason = "a trade for this symbol is still open, so no new position was opened.";
+        }
+        else if (spotSellSignal && !AllowSpotSellWithoutPosition)
+        {
+            skipReason = "spot SELL ignored: there is no open long position to close.";
+        }
+
+        if (skipReason != null)
+        {
+            await PersistSignalAsync(
+                db,
+                bot.UserId,
+                signal,
+                wasExecuted: false,
+                tradeId: null,
+                cancellationToken: cancellationToken);
+
+            await WriteAuditAsync(
+                db,
+                bot.UserId,
+                "AutoTradeSignalBlocked",
+                $"Bot {bot.Id} skipped {signal.Action} for {symbol}: {skipReason}",
+                cancellationToken);
+
+            MarkCandleProcessed(processKey, latestClosedCandle.Timestamp);
+            return;
+        }
+
         var idempotencyKey = BuildIdempotencyKey(
             bot.Id,
             symbol,
@@ -419,6 +537,8 @@ public sealed class AutoTradeService : BackgroundService
 
         var isSpot = !bot.UseFutures;
         var isSpotSell = isSpot && signal.Action.Equals("SELL", StringComparison.OrdinalIgnoreCase);
+        var useMarketEntry = !isSpot ||
+                             broker.BrokerName.Equals("Binance", StringComparison.OrdinalIgnoreCase);
 
         // Do not cancel an exchange submission once it has started. If the
         // network call is interrupted, its outcome may be unknown and the
@@ -429,12 +549,13 @@ public sealed class AutoTradeService : BackgroundService
             userId: bot.UserId,
             symbol: symbol,
             direction: signal.Action,
-            orderType: isSpot ? "Limit" : "Market",
+            orderType: useMarketEntry ? "Market" : "Limit",
             stopLoss: isSpotSell ? null : resolvedStopLoss,
             takeProfit: isSpotSell ? null : resolvedTakeProfit,
             entryPrice: isSpot ? signal.Price : null,
             useFutures: bot.UseFutures,
-            idempotencyKey: idempotencyKey);
+            idempotencyKey: idempotencyKey,
+            botId: bot.Id);
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -739,6 +860,35 @@ public sealed class AutoTradeService : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var reconciliation = scope.ServiceProvider.GetRequiredService<IReconciliationService>();
 
+        // A trade that is still "Pending" with no exchange order behind it can never
+        // be reconciled (the order never reached the exchange or was never saved).
+        // It would hold a slot in the max-open-trades limit forever, so expire it.
+        var orphanCutoff = now.AddHours(-1);
+        var orphanTrades = await db.Trades
+            .Where(t =>
+                t.Status == "Pending" &&
+                t.EntryTime < orphanCutoff &&
+                !db.ExchangeOrders.Any(o => o.TradeId == t.Id))
+            .ToListAsync(cancellationToken);
+
+        if (orphanTrades.Count > 0)
+        {
+            foreach (var orphan in orphanTrades)
+            {
+                orphan.Status = "Cancelled";
+                orphan.Reason = "Order never reached the exchange; expired automatically.";
+                orphan.UpdatedAt = now;
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+
+            _logger.LogWarning(
+                "Expired {Count} pending trade(s) that had no exchange order.",
+                orphanTrades.Count);
+        }
+
+        var protectionRetryCutoff = now.AddHours(-24);
+
         var userIds = await db.ExchangeOrders
             .AsNoTracking()
             .Where(o =>
@@ -746,10 +896,25 @@ public sealed class AutoTradeService : BackgroundService
                 o.Status == "New" ||
                 o.Status == "NEW" ||
                 o.Status == "PartiallyFilled" ||
-                o.Status == "PendingReconciliation")
+                o.Status == "PendingReconciliation" ||
+                (o.OrderRole == "Entry" &&
+                 o.Trade.Status == "Open" &&
+                 o.Trade.EntryTime > protectionRetryCutoff &&
+                 (o.Trade.ProtectionStatus == "ProtectionPending" ||
+                  o.Trade.ProtectionStatus == "Pending")))
             .Select(o => o.UserId)
             .Distinct()
             .ToListAsync(cancellationToken);
+
+        // Bybit trades can close on the exchange without leaving an order here.
+        var bybitUserIds = await db.Trades
+            .AsNoTracking()
+            .Where(t => t.Status == "Open" && t.BrokerName == "Bybit")
+            .Select(t => t.UserId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        userIds = userIds.Union(bybitUserIds).ToList();
 
         // Only advance the schedule after the database query succeeded. A
         // transient database outage must not consume the reconciliation window.
@@ -809,6 +974,28 @@ public sealed class AutoTradeService : BackgroundService
         DateTime candleTimestamp) =>
         $"auto:{botId}:{symbol.Trim().ToUpperInvariant()}:{timeframe.Trim().ToLowerInvariant()}:{candleTimestamp.ToUniversalTime():yyyyMMddHHmmss}";
 
+    // Books an exit order right away instead of waiting for the next scheduled reconciliation.
+    private async Task ReconcileUserNowAsync(int userId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var reconciliation = scope.ServiceProvider.GetRequiredService<IReconciliationService>();
+            await reconciliation.ReconcilePendingOrdersAsync(userId, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Immediate reconciliation after closing a position failed for user {UserId}.",
+                userId);
+        }
+    }
+
     private static bool IsCandleClosed(DateTime candleOpenTime, string timeframe)
     {
         var duration = GetTimeframeDuration(timeframe);
@@ -835,7 +1022,7 @@ public sealed class AutoTradeService : BackgroundService
             _ => throw new ArgumentException($"Unsupported timeframe '{timeframe}'.", nameof(timeframe))
         };
 
-    private static BotEligibilityResult EvaluateEligibility(TradingBot bot)
+    public static BotEligibilityResult EvaluateEligibility(TradingBot bot)
     {
         if (bot.User == null)
             return BotEligibilityResult.Blocked("user record is unavailable");
@@ -923,7 +1110,7 @@ public sealed class AutoTradeService : BackgroundService
         brokerName.Equals("Binance", StringComparison.OrdinalIgnoreCase) ||
         brokerName.Equals("Bybit", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record BotEligibilityResult(
+    public sealed record BotEligibilityResult(
         bool IsEligible,
         string Reason,
         IReadOnlyList<string> EnabledSymbols)

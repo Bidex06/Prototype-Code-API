@@ -104,6 +104,7 @@ public sealed class ExchangeOrderResponseDto
 public sealed class TradeResponseDto
 {
     public int Id { get; set; }
+    public int? BotId { get; set; }
     public string Symbol { get; set; } = string.Empty;
     public string Direction { get; set; } = string.Empty;
     public decimal EntryPrice { get; set; }

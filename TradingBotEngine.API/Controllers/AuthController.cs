@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Security.Claims;
 using TradingBotEngine.Services;
 using TradingBotEngine.Services.Models;
@@ -18,6 +19,7 @@ namespace TradingBotEngine.API.Controllers
         }
 
         [HttpPost("register")]
+        [EnableRateLimiting("auth")]
         [RequestSizeLimit(16 * 1024)]
         public async Task<IActionResult> Register([FromBody] RegisterRequest request)
         {
@@ -35,6 +37,7 @@ namespace TradingBotEngine.API.Controllers
         }
 
         [HttpPost("login")]
+        [EnableRateLimiting("auth")]
         [RequestSizeLimit(16 * 1024)]
         public async Task<IActionResult> Login([FromBody] LoginRequest request)
         {
@@ -51,6 +54,7 @@ namespace TradingBotEngine.API.Controllers
         }
 
         [HttpPost("refresh")]
+        [EnableRateLimiting("auth")]
         [RequestSizeLimit(16 * 1024)]
         public async Task<IActionResult> Refresh([FromBody] RefreshRequest request)
         {

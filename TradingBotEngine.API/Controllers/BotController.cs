@@ -138,6 +138,8 @@ public sealed class BotController : ControllerBase
         await AddAuditAsync(userId, "TradingBotCreated", $"Trading bot '{name}' was created.");
         await _context.SaveChangesAsync();
 
+        TradingBotEngine.Services.AutoTradeService.RequestImmediateRun();
+
         await _context.Entry(bot).Reference(b => b.BrokerConnection).LoadAsync();
         await _context.Entry(bot).Collection(b => b.TrackedSymbols).Query().Include(x => x.TrackedSymbol).LoadAsync();
 
@@ -279,6 +281,9 @@ public sealed class BotController : ControllerBase
 
         await AddAuditAsync(userId, "TradingBotStarted", $"Trading bot '{bot.Name}' (ID {bot.Id}) was started.");
         await _context.SaveChangesAsync();
+
+        // evaluate the first signal right away instead of waiting for the next cycle
+        TradingBotEngine.Services.AutoTradeService.RequestImmediateRun();
 
         return Ok(ToResponse(bot));
     }
@@ -457,6 +462,71 @@ public sealed class BotController : ControllerBase
         TakeProfitMode = bot.TakeProfitMode,
         TakeProfitPercent = bot.TakeProfitPercent
     };
+
+    /// <summary>
+    /// Tells the UI whether a running bot is actually allowed to trade right now,
+    /// using the same rules the auto-trade worker applies.
+    /// </summary>
+    [HttpGet("{id:int}/readiness")]
+    public async Task<IActionResult> GetReadiness(int id)
+    {
+        if (!TryGetUserId(out var userId))
+            return Unauthorized(new { message = "Invalid user identity." });
+
+        var bot = await _context.TradingBots
+            .AsNoTracking()
+            .Where(b => b.Id == id && b.UserId == userId)
+            .Include(b => b.User)
+                .ThenInclude(u => u.Subscription)
+            .Include(b => b.User)
+                .ThenInclude(u => u.RiskSetting)
+            .Include(b => b.BrokerConnection)
+            .Include(b => b.TrackedSymbols)
+                .ThenInclude(x => x.TrackedSymbol)
+            .FirstOrDefaultAsync();
+
+        if (bot == null)
+            return NotFound(new { message = "Trading bot not found." });
+
+        if (!bot.IsEnabled)
+            return Ok(new { isEligible = false, reason = "the bot is disabled." });
+
+        var result = TradingBotEngine.Services.AutoTradeService.EvaluateEligibility(bot);
+        return Ok(new { isEligible = result.IsEligible, reason = result.Reason });
+    }
+
+    /// <summary>
+    /// Recent auto-trade decisions for one bot (accepted, rejected, skipped),
+    /// read from the audit log so the user can see why no order was placed.
+    /// </summary>
+    [HttpGet("{id:int}/activity")]
+    public async Task<IActionResult> GetActivity(int id, [FromQuery] int limit = 15)
+    {
+        if (!TryGetUserId(out var userId))
+            return Unauthorized(new { message = "Invalid user identity." });
+
+        var ownsBot = await _context.TradingBots
+            .AsNoTracking()
+            .AnyAsync(b => b.Id == id && b.UserId == userId);
+
+        if (!ownsBot)
+            return NotFound(new { message = "Trading bot not found." });
+
+        limit = Math.Clamp(limit, 1, 50);
+        var marker = $"Bot {id} ";
+
+        var rows = await _context.AuditLogs
+            .AsNoTracking()
+            .Where(a => a.UserId == userId
+                        && a.Action.StartsWith("AutoTrade")
+                        && a.Details.Contains(marker))
+            .OrderByDescending(a => a.CreatedAt)
+            .Take(limit)
+            .Select(a => new { a.Action, a.Details, a.CreatedAt })
+            .ToListAsync();
+
+        return Ok(rows);
+    }
 
     private bool TryGetUserId(out int userId)
     {

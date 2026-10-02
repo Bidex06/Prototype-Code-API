@@ -180,8 +180,10 @@ namespace TradingBotEngine.Services
                 {
                     UpdateTradeFromOrder(order);
 
+                    // UpdateTradeFromOrder turns a filled entry into "Open", so "Filled"
+                    // alone never matched and the protection retry never ran.
                     if (order.Trade != null &&
-                        order.Trade.Status == "Filled" &&
+                        (order.Trade.Status == "Filled" || order.Trade.Status == "Open") &&
                         (order.Trade.ProtectionStatus == "ProtectionPending" ||
                          order.Trade.ProtectionStatus == "Pending"))
                     {
@@ -193,7 +195,8 @@ namespace TradingBotEngine.Services
                     }
                 }
                 else if (string.Equals(order.OrderRole, "StopLoss", StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(order.OrderRole, "TakeProfit", StringComparison.OrdinalIgnoreCase))
+                         string.Equals(order.OrderRole, "TakeProfit", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(order.OrderRole, "Exit", StringComparison.OrdinalIgnoreCase))
                 {
                     UpdateTradeFromProtectionOrder(order);
                 }
@@ -294,10 +297,131 @@ namespace TradingBotEngine.Services
             }
         }
 
+        // Bybit keeps stop-loss / take-profit on its own side, so when one triggers there is no
+        // order in this app to notice. Look for a filled order on the closing side after the
+        // entry and close the trade here, so the position slot is freed and P&L is recorded.
+        private async Task<int> SyncBybitClosedTradesAsync(
+            int userId,
+            CancellationToken cancellationToken)
+        {
+            var openTrades = await _context.Trades
+                .Where(t =>
+                    t.UserId == userId &&
+                    t.Status == "Open" &&
+                    t.BrokerName == "Bybit" &&
+                    t.ProtectionStatus != "Closing")
+                .ToListAsync(cancellationToken);
+
+            if (openTrades.Count == 0)
+                return 0;
+
+            var closed = 0;
+
+            foreach (var trade in openTrades)
+            {
+                try
+                {
+                    var entryOrder = await _context.ExchangeOrders
+                        .Where(o => o.TradeId == trade.Id && o.OrderRole == "Entry")
+                        .OrderBy(o => o.Id)
+                        .FirstOrDefaultAsync(cancellationToken);
+
+                    if (entryOrder == null)
+                        continue;
+
+                    var connection = await _context.BrokerConnections
+                        .FirstOrDefaultAsync(
+                            c => c.UserId == userId &&
+                                 c.IsActive &&
+                                 c.BrokerName == "Bybit" &&
+                                 c.IsTestnet == entryOrder.IsTestnet,
+                            cancellationToken);
+
+                    if (connection == null)
+                        continue;
+
+                    if (_brokerService.CreateClient(connection) is not BybitRestClient bybit)
+                        continue;
+
+                    var category = entryOrder.IsFutures
+                        ? Bybit.Net.Enums.Category.Linear
+                        : Bybit.Net.Enums.Category.Spot;
+
+                    var isLong = !string.Equals(trade.Direction, "SELL", StringComparison.OrdinalIgnoreCase);
+                    var closingSide = isLong
+                        ? Bybit.Net.Enums.OrderSide.Sell
+                        : Bybit.Net.Enums.OrderSide.Buy;
+
+                    var history = await bybit.V5Api.Trading.GetOrderHistoryAsync(
+                        category,
+                        trade.Symbol,
+                        null,
+                        null,
+                        null,
+                        Bybit.Net.Enums.V5.OrderStatus.Filled,
+                        null,
+                        trade.EntryTime.AddMinutes(-1),
+                        null,
+                        50,
+                        null,
+                        cancellationToken);
+
+                    if (!history.Success || history.Data?.List == null)
+                        continue;
+
+                    var exitOrder = history.Data.List
+                        .Where(o =>
+                            o.Side == closingSide &&
+                            o.QuantityFilled.GetValueOrDefault() > 0m &&
+                            o.UpdateTime >= trade.EntryTime)
+                        .OrderBy(o => o.UpdateTime)
+                        .FirstOrDefault();
+
+                    if (exitOrder == null)
+                        continue;
+
+                    if (exitOrder.AveragePrice.GetValueOrDefault() > 0m)
+                        trade.ExitPrice = exitOrder.AveragePrice;
+
+                    trade.ExitTime = DateTime.UtcNow;
+                    trade.Status = "Closed";
+                    trade.ProtectionStatus = "Triggered";
+                    trade.Reason = "Closed on Bybit (stop-loss, take-profit or manual exit).";
+                    trade.UpdatedAt = DateTime.UtcNow;
+                    ApplyRealizedPnl(trade);
+
+                    _context.AuditLogs.Add(new AuditLog
+                    {
+                        UserId = userId,
+                        Action = "BybitPositionClosedExternally",
+                        Details = $"Trade {trade.Id} ({trade.Symbol}) was closed on Bybit by order {exitOrder.OrderId}.",
+                        CreatedAt = DateTime.UtcNow
+                    });
+
+                    await _context.SaveChangesAsync(cancellationToken);
+                    closed++;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    // best effort: try again on the next reconciliation cycle
+                }
+            }
+
+            return closed;
+        }
+
         public async Task<int> ReconcilePendingOrdersAsync(
             int userId,
             CancellationToken cancellationToken = default)
         {
+            // Filled entry orders whose stop-loss/take-profit is still missing are
+            // revisited too (recent trades only, so a permanent failure cannot loop forever).
+            var protectionRetryCutoff = DateTime.UtcNow.AddHours(-24);
+
             var orders = await _context.ExchangeOrders
                 .Where(o =>
                     o.UserId == userId &&
@@ -305,7 +429,12 @@ namespace TradingBotEngine.Services
                      o.Status == "New" ||
                      o.Status == "NEW" ||
                      o.Status == "PartiallyFilled" ||
-                     o.Status == "PendingReconciliation"))
+                     o.Status == "PendingReconciliation" ||
+                     (o.OrderRole == "Entry" &&
+                      o.Trade.Status == "Open" &&
+                      o.Trade.EntryTime > protectionRetryCutoff &&
+                      (o.Trade.ProtectionStatus == "ProtectionPending" ||
+                       o.Trade.ProtectionStatus == "Pending"))))
                 .Select(o => o.Id)
                 .ToListAsync(cancellationToken);
 
@@ -316,6 +445,8 @@ namespace TradingBotEngine.Services
                 if (await ReconcileOrderAsync(userId, orderId, cancellationToken))
                     reconciled++;
             }
+
+            reconciled += await SyncBybitClosedTradesAsync(userId, cancellationToken);
 
             return reconciled;
         }
@@ -465,6 +596,10 @@ namespace TradingBotEngine.Services
             if (order.Trade == null)
                 return;
 
+            // Once a trade is closed, the cancelled second leg of an OCO must not reopen it.
+            if (string.Equals(order.Trade.Status, "Closed", StringComparison.OrdinalIgnoreCase))
+                return;
+
             order.Trade.UpdatedAt = DateTime.UtcNow;
 
             if (order.Status == "Filled" && order.FilledQuantity > 0m)
@@ -476,9 +611,12 @@ namespace TradingBotEngine.Services
                 order.Trade.Status = "Closed";
                 order.Trade.Reason = order.OrderRole == "StopLoss"
                     ? "Stop-loss protection triggered."
-                    : "Take-profit protection triggered.";
-                order.Trade.ProtectionStatus = "Triggered";
+                    : order.OrderRole == "Exit"
+                        ? "Closed by an opposite signal."
+                        : "Take-profit protection triggered.";
+                order.Trade.ProtectionStatus = order.OrderRole == "Exit" ? "Closed" : "Triggered";
                 order.Trade.UpdatedAt = DateTime.UtcNow;
+                ApplyRealizedPnl(order.Trade);
 
                 _context.AuditLogs.Add(new AuditLog
                 {
@@ -490,12 +628,29 @@ namespace TradingBotEngine.Services
                 return;
             }
 
-            if (IsTerminalFailure(order.Status))
+            if (IsTerminalFailure(order.Status) &&
+                (order.OrderRole == "Exit" || order.Trade.ProtectionStatus != "Closing"))
             {
                 order.Trade.ProtectionStatus = "ProtectionPending";
                 order.Trade.Reason = order.FailureReason ?? $"Protection order status: {order.Status}";
                 order.Trade.UpdatedAt = DateTime.UtcNow;
             }
+        }
+
+        // Gross realized P&L (fees are not deducted).
+        private static void ApplyRealizedPnl(Trade trade)
+        {
+            var entry = trade.EntryPrice;
+
+            if (!trade.ExitPrice.HasValue || !(entry > 0m) || !(trade.Quantity > 0m))
+                return;
+
+            var exit = trade.ExitPrice.Value;
+            var isLong = !string.Equals(trade.Direction, "SELL", StringComparison.OrdinalIgnoreCase);
+            var difference = isLong ? exit - entry : entry - exit;
+
+            trade.ProfitLoss = difference * trade.Quantity;
+            trade.ProfitLossPercentage = difference / entry * 100m;
         }
 
         private void UpdateTradeFromOrder(ExchangeOrder order)

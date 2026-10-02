@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
@@ -22,6 +24,13 @@ var jwtAudience = builder.Configuration["Jwt:Audience"]
 if (jwtKey.Length < 32)
     throw new InvalidOperationException("Jwt:Key must be at least 32 characters long.");
 
+// The sample key from appsettings.json lets anyone forge tokens. Refuse to start with it
+// outside Development.
+if (jwtKey.Contains("YourSuperSecretKey", StringComparison.OrdinalIgnoreCase) &&
+    !builder.Environment.IsDevelopment())
+    throw new InvalidOperationException(
+        "Jwt:Key is still the sample value. Set a unique secret (for example the environment variable Jwt__Key).");
+
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
     ?? new[] { "http://localhost:5173" };
 
@@ -39,7 +48,45 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services.AddMemoryCache();
-builder.Services.AddDataProtection();
+// Broker API keys are encrypted with these keys. Without a persistent location they are lost
+// on restart or redeploy (Docker, Azure) and every stored broker key becomes unreadable.
+var dataProtectionKeysPath = builder.Configuration["DataProtection:KeysPath"];
+var dataProtectionBuilder = builder.Services.AddDataProtection();
+
+if (!string.IsNullOrWhiteSpace(dataProtectionKeysPath))
+{
+    Directory.CreateDirectory(dataProtectionKeysPath);
+    dataProtectionBuilder
+        .SetApplicationName("TradingBotEngine")
+        .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionKeysPath));
+}
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("auth", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("trading", httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.Identity?.Name
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
 builder.Services.AddSingleton<ICredentialProtector, CredentialProtector>();
 
 builder.Services.AddScoped<AuthService>();
@@ -130,7 +177,14 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddSignalR();
 
+// Bybit "testnet" connections use Bybit Demo Trading when this is on (see BybitEnvironments).
+BybitEnvironments.UseDemoTrading = builder.Configuration.GetValue<bool>("Bybit:UseDemoTrading");
+
 var app = builder.Build();
+
+if (string.IsNullOrWhiteSpace(dataProtectionKeysPath) && !app.Environment.IsDevelopment())
+    app.Logger.LogWarning(
+        "DataProtection:KeysPath is not set. Stored broker API keys will be unreadable after a restart or redeploy.");
 
 if (app.Environment.IsDevelopment())
 {
@@ -142,6 +196,7 @@ app.UseHttpsRedirection();
 app.UseCors("AllowReactApp");
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
 app.MapHub<TradingHub>("/tradingHub");

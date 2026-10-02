@@ -156,6 +156,23 @@ public class UserController : ControllerBase
         });
     }
 
+    [HttpGet("emergency-kill-switch")]
+    public async Task<IActionResult> GetEmergencyKillSwitch()
+    {
+        if (!TryGetUserId(out var userId))
+            return Unauthorized(new { message = "Invalid user identity." });
+
+        var riskSetting = await _context.RiskSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(r => r.UserId == userId);
+
+        return Ok(new
+        {
+            enabled = riskSetting?.IsEmergencyKillSwitch ?? false,
+            activatedAt = riskSetting?.EmergencyKillSwitchActivatedAt
+        });
+    }
+
     [HttpPut("emergency-kill-switch")]
     public async Task<IActionResult> SetEmergencyKillSwitch(
         [FromBody] EmergencyKillSwitchRequestDto request)

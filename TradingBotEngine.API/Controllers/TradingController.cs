@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using TradingBotEngine.API.DTOs.Trading;
@@ -318,6 +319,7 @@ public sealed class TradingController : ControllerBase
     }
 
     [HttpPost("place-order")]
+    [EnableRateLimiting("trading")]
     public async Task<IActionResult> PlaceOrder(
         [FromBody] PlaceOrderRequestDto request,
         [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
@@ -512,6 +514,7 @@ public sealed class TradingController : ControllerBase
             .Select(t => new TradeResponseDto
             {
                 Id = t.Id,
+                BotId = t.BotId,
                 Symbol = t.Symbol,
                 Direction = t.Direction,
                 EntryPrice = t.EntryPrice,

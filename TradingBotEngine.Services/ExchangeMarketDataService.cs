@@ -137,9 +137,7 @@ public sealed class ExchangeMarketDataService
         symbol = symbol.Trim().ToUpperInvariant();
         var client = new BybitRestClient(options =>
         {
-            options.Environment = isTestnet
-                ? BybitEnvironment.Testnet
-                : BybitEnvironment.Live;
+            options.Environment = BybitEnvironments.ForMarketData(isTestnet);
         });
 
         if (useFutures)
@@ -342,7 +340,7 @@ public sealed class ExchangeMarketDataService
         var category = useFutures ? Category.Linear : Category.Spot;
         var client = new BybitRestClient(options =>
         {
-            options.Environment = isTestnet ? BybitEnvironment.Testnet : BybitEnvironment.Live;
+            options.Environment = BybitEnvironments.ForMarketData(isTestnet);
         });
 
         var result = await client.V5Api.ExchangeData.GetKlinesAsync(category, symbol, interval, limit: limit);

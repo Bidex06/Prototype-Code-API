@@ -16,6 +16,9 @@ namespace TradingBotEngine.Data.Models
         
         [Required, MaxLength(10)]
         public string Direction { get; set; }  // "Buy" or "Sell"
+
+        // The bot that opened this trade (null for manual or older trades).
+        public int? BotId { get; set; }
         
         public decimal EntryPrice { get; set; }
         public decimal? ExitPrice { get; set; }

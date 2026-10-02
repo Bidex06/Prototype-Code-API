@@ -455,25 +455,25 @@ namespace TradingBotEngine.Services
 
                 if (client is BybitRestClient bybit)
                 {
-                    var accountType = useFutures
-                        ? Bybit.Net.Enums.AccountType.Contract
-                        : Bybit.Net.Enums.AccountType.Spot;
-
+                    // Every current Bybit account (including demo) is a Unified account. The old
+                    // Spot/Contract account types are rejected, and "Free" is empty on Unified.
                     var result =
                         await bybit.V5Api.Account
                             .GetBalancesAsync(
-                                accountType,
+                                Bybit.Net.Enums.AccountType.Unified,
                                 currency,
                                 CancellationToken.None);
 
                     if (result.Success)
                     {
-                        return result.Data.List?
+                        var coin = result.Data.List?
                             .FirstOrDefault()?
                             .Assets?
                             .FirstOrDefault(a =>
-                                a.Asset == currency)
-                            ?.Free ?? 0;
+                                a.Asset == currency);
+
+                        if (coin != null)
+                            return coin.Free ?? Math.Max(0m, coin.WalletBalance - (coin.Locked ?? 0m));
                     }
                 }
             }
@@ -495,7 +495,8 @@ namespace TradingBotEngine.Services
             decimal? entryPrice = null,
             bool useFutures = false,
             string? idempotencyKey = null,
-            int? connectionId = null)
+            int? connectionId = null,
+            int? botId = null)
         {
             symbol = symbol?.Trim() ?? string.Empty;
             direction = direction?.Trim() ?? string.Empty;
@@ -1208,6 +1209,7 @@ namespace TradingBotEngine.Services
             var pendingTrade = new Trade
             {
                 UserId = userId,
+                BotId = botId,
                 Symbol = symbol,
                 Direction = direction.ToUpperInvariant(),
 
@@ -1344,6 +1346,8 @@ namespace TradingBotEngine.Services
 
                     if (useFutures)
                     {
+                        await EnsureFuturesAccountSettingsAsync(binance, symbol, riskSetting.Leverage);
+
                         var result =
                             await binance
                                 .UsdFuturesApi
@@ -1563,7 +1567,9 @@ namespace TradingBotEngine.Services
                         spotOrderId;
 
                     pendingTrade.EntryPrice =
-                        spot.Data?.Price ??
+                        (spot.Data != null && spot.Data.Price > 0m
+                            ? spot.Data.Price
+                            : (decimal?)null) ??
                         entryPrice ??
                         0m;
 
@@ -1807,6 +1813,327 @@ namespace TradingBotEngine.Services
         }
 
 
+        private static decimal RoundToStep(decimal value, decimal step) =>
+            step <= 0m
+                ? value
+                : Math.Round(value / step, 0, MidpointRounding.AwayFromZero) * step;
+
+        private static string LimitLength(string value, int maxLength) =>
+            value.Length <= maxLength ? value : value.Substring(0, maxLength);
+
+        // Binance rejects prices that are not a multiple of the symbol's tick size
+        // (PRICE_FILTER). Percent-based stop-loss/take-profit levels are not.
+        private static async Task<decimal?> TryGetSpotTickSizeAsync(
+            BinanceRestClient binance,
+            string symbol)
+        {
+            try
+            {
+                var info = await binance.SpotApi.ExchangeData.GetExchangeInfoAsync(symbol);
+                if (!info.Success || info.Data == null)
+                    return null;
+
+                var market = info.Data.Symbols.FirstOrDefault(x =>
+                    string.Equals(x.Name, symbol, StringComparison.OrdinalIgnoreCase));
+
+                var tick = market?.PriceFilter?.TickSize;
+                return tick.HasValue && tick.Value > 0m ? tick : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static async Task<decimal?> TryGetFuturesTickSizeAsync(
+            BinanceRestClient binance,
+            string symbol)
+        {
+            try
+            {
+                var info = await binance.UsdFuturesApi.ExchangeData.GetExchangeInfoAsync();
+                if (!info.Success || info.Data == null)
+                    return null;
+
+                var market = info.Data.Symbols.FirstOrDefault(x =>
+                    string.Equals(x.Name, symbol, StringComparison.OrdinalIgnoreCase));
+
+                var tick = market?.PriceFilter?.TickSize;
+                return tick.HasValue && tick.Value > 0m ? tick : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Futures orders assume one-way position mode. Leverage comes from the user's
+        // risk settings and margin is isolated so one position cannot drain the account.
+        // Every call is best effort: the exchange refuses a change when the value is
+        // already set or a position is open, and that is fine.
+        private static async Task EnsureFuturesAccountSettingsAsync(
+            BinanceRestClient binance,
+            string symbol,
+            decimal leverage)
+        {
+            try { await binance.UsdFuturesApi.Account.ModifyPositionModeAsync(false); } catch { }
+
+            try { await binance.UsdFuturesApi.Account.ChangeMarginTypeAsync(symbol, FuturesMarginType.Isolated); } catch { }
+
+            try
+            {
+                var target = (int)Math.Max(1m, Math.Round(leverage, MidpointRounding.AwayFromZero));
+                await binance.UsdFuturesApi.Account.ChangeInitialLeverageAsync(symbol, target);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Closes an open Binance position (spot long or futures long/short) with a market
+        /// order. Protection orders are cancelled first. The exit order is saved so
+        /// reconciliation books the exit price and P&amp;L once it is confirmed.
+        /// </summary>
+        public async Task<BrokerOrderResult> ClosePositionAsync(
+            int userId,
+            int tradeId,
+            BrokerConnection connection,
+            bool useFutures)
+        {
+            var trade = await _context.Trades
+                .FirstOrDefaultAsync(t => t.Id == tradeId && t.UserId == userId);
+
+            if (trade == null)
+                return BrokerOrderResult.Fail("Trade not found.");
+
+            if (!string.Equals(trade.Status, "Open", StringComparison.OrdinalIgnoreCase))
+                return BrokerOrderResult.Fail($"Trade {tradeId} is {trade.Status}, not Open.");
+
+            if (connection.BrokerName.Equals("Bybit", StringComparison.OrdinalIgnoreCase))
+                return await CloseBybitPositionAsync(userId, trade, connection, useFutures);
+
+            if (!connection.BrokerName.Equals("Binance", StringComparison.OrdinalIgnoreCase))
+                return BrokerOrderResult.Fail("Closing positions automatically is not supported for this broker.");
+
+            var client = CreateClient(connection);
+            if (client is not BinanceRestClient binance)
+                return BrokerOrderResult.Fail("Unable to create the Binance client.");
+
+            async Task<BrokerOrderResult> FailCloseAsync(string message)
+            {
+                // The protection orders were cancelled, so let the retry re-create them.
+                trade.ProtectionStatus = "ProtectionPending";
+                trade.Reason = LimitLength(message, 480);
+                trade.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                return BrokerOrderResult.Fail(message);
+            }
+
+            // Stops the trade from being re-protected while it is being closed.
+            trade.ProtectionStatus = "Closing";
+            trade.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            foreach (var protectionOrderId in new[] { trade.StopLossOrderId, trade.TakeProfitOrderId }
+                         .Where(id => !string.IsNullOrWhiteSpace(id))
+                         .Distinct())
+            {
+                try
+                {
+                    // Cancelling one leg of a spot OCO cancels the whole list, so the
+                    // second call may report a failure. That is expected.
+                    await CancelOrderAsync(userId, trade.Symbol, protectionOrderId!, useFutures);
+                }
+                catch
+                {
+                    // keep going: the exit order below is what matters
+                }
+            }
+
+            trade.StopLossOrderId = null;
+            trade.TakeProfitOrderId = null;
+
+            var quantity = trade.Quantity;
+
+            if (!useFutures)
+            {
+                var freeBase = await GetSpotAssetBalanceAsync(ExtractBaseAsset(trade.Symbol), connection);
+                if (freeBase > 0m && freeBase < quantity)
+                    quantity = freeBase;
+
+                var stepSize = await TryGetSpotStepSizeAsync(binance, trade.Symbol);
+                if (stepSize.HasValue)
+                    quantity = RoundDownToStep(quantity, stepSize.Value);
+            }
+
+            if (quantity <= 0m)
+                return await FailCloseAsync("Close skipped: no sellable quantity is available.");
+
+            string exitOrderId;
+            string exitSide;
+
+            if (!useFutures)
+            {
+                var sell = await binance.SpotApi.Trading.PlaceOrderAsync(
+                    symbol: trade.Symbol,
+                    side: OrderSide.Sell,
+                    type: SpotOrderType.Market,
+                    quantity: quantity);
+
+                if (!sell.Success || sell.Data == null)
+                    return await FailCloseAsync($"Exit order was rejected: {sell.Error}");
+
+                exitOrderId = sell.Data.Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                exitSide = "SELL";
+            }
+            else
+            {
+                var isLong = !string.Equals(trade.Direction, "SELL", StringComparison.OrdinalIgnoreCase);
+
+                var exit = await binance.UsdFuturesApi.Trading.PlaceOrderAsync(
+                    symbol: trade.Symbol,
+                    side: isLong ? OrderSide.Sell : OrderSide.Buy,
+                    type: FuturesOrderType.Market,
+                    quantity: quantity,
+                    positionSide: PositionSide.Both,
+                    reduceOnly: true);
+
+                if (!exit.Success || exit.Data == null)
+                    return await FailCloseAsync($"Exit order was rejected: {exit.Error}");
+
+                exitOrderId = exit.Data.Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                exitSide = isLong ? "SELL" : "BUY";
+            }
+
+            var entryOrder = await _context.ExchangeOrders
+                .Where(o => o.TradeId == trade.Id && o.OrderRole == "Entry")
+                .OrderBy(o => o.Id)
+                .FirstOrDefaultAsync();
+
+            await PersistExchangeOrderAsync(
+                userId, trade, connection, exitOrderId, exitSide, "Market", useFutures, "Exit", entryOrder?.Id);
+
+            trade.Reason = "Exit order submitted after an opposite signal.";
+            trade.UpdatedAt = DateTime.UtcNow;
+
+            _context.AuditLogs.Add(new AuditLog
+            {
+                UserId = userId,
+                Action = "PositionCloseSubmitted",
+                Details = $"Exit market order {exitOrderId} submitted for trade {trade.Id} ({trade.Symbol}, qty={quantity}).",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            await _context.SaveChangesAsync();
+
+            return BrokerOrderResult.SuccessResult(exitOrderId, null);
+        }
+
+        // Bybit keeps stop-loss / take-profit attached to the order or position, so there are
+        // no separate protection orders to cancel here. The exit order is saved so
+        // reconciliation books the exit price and P&L.
+        private async Task<BrokerOrderResult> CloseBybitPositionAsync(
+            int userId,
+            Trade trade,
+            BrokerConnection connection,
+            bool useFutures)
+        {
+            var client = CreateClient(connection);
+            if (client is not BybitRestClient bybit)
+                return BrokerOrderResult.Fail("Unable to create the Bybit client.");
+
+            var category = useFutures
+                ? Bybit.Net.Enums.Category.Linear
+                : Bybit.Net.Enums.Category.Spot;
+
+            var isLong = !string.Equals(trade.Direction, "SELL", StringComparison.OrdinalIgnoreCase);
+
+            var quantity = trade.Quantity;
+            if (!useFutures)
+            {
+                // Fees are taken from the bought asset, so sell what is actually available.
+                var freeBase = await GetSpotAssetBalanceAsync(ExtractBaseAsset(trade.Symbol), connection);
+                if (freeBase > 0m && freeBase < quantity)
+                    quantity = freeBase;
+            }
+
+            if (quantity <= 0m)
+                return BrokerOrderResult.Fail("Close skipped: no sellable quantity is available.");
+
+            var previousProtection = trade.ProtectionStatus;
+            trade.ProtectionStatus = "Closing";
+            trade.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            var exit = await bybit.V5Api.Trading.PlaceOrderAsync(
+                category: category,
+                symbol: trade.Symbol,
+                side: isLong ? Bybit.Net.Enums.OrderSide.Sell : Bybit.Net.Enums.OrderSide.Buy,
+                type: Bybit.Net.Enums.NewOrderType.Market,
+                quantity: quantity,
+                reduceOnly: useFutures ? true : (bool?)null);
+
+            var exitOrderId = exit.Data?.OrderId;
+
+            if (!exit.Success || string.IsNullOrWhiteSpace(exitOrderId))
+            {
+                var message = $"Exit order was rejected: {exit.Error}";
+                trade.ProtectionStatus = previousProtection;
+                trade.Reason = LimitLength(message, 480);
+                trade.UpdatedAt = DateTime.UtcNow;
+                await _context.SaveChangesAsync();
+                return BrokerOrderResult.Fail(message);
+            }
+
+            var entryOrder = await _context.ExchangeOrders
+                .Where(o => o.TradeId == trade.Id && o.OrderRole == "Entry")
+                .OrderBy(o => o.Id)
+                .FirstOrDefaultAsync();
+
+            await PersistExchangeOrderAsync(
+                userId, trade, connection, exitOrderId, isLong ? "SELL" : "BUY",
+                "Market", useFutures, "Exit", entryOrder?.Id);
+
+            trade.Reason = "Exit order submitted after an opposite signal.";
+            trade.UpdatedAt = DateTime.UtcNow;
+
+            _context.AuditLogs.Add(new AuditLog
+            {
+                UserId = userId,
+                Action = "PositionCloseSubmitted",
+                Details = $"Bybit exit market order {exitOrderId} submitted for trade {trade.Id} ({trade.Symbol}, qty={quantity}).",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            await _context.SaveChangesAsync();
+
+            return BrokerOrderResult.SuccessResult(exitOrderId, null);
+        }
+
+        private static decimal RoundDownToStep(decimal value, decimal step) =>
+            step <= 0m ? value : Math.Floor(value / step) * step;
+
+        private static async Task<decimal?> TryGetSpotStepSizeAsync(
+            BinanceRestClient binance,
+            string symbol)
+        {
+            try
+            {
+                var info = await binance.SpotApi.ExchangeData.GetExchangeInfoAsync(symbol);
+                if (!info.Success || info.Data == null)
+                    return null;
+
+                var market = info.Data.Symbols.FirstOrDefault(x =>
+                    string.Equals(x.Name, symbol, StringComparison.OrdinalIgnoreCase));
+
+                var step = market?.LotSizeFilter?.StepSize;
+                return step.HasValue && step.Value > 0m ? step : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         internal async Task<bool> TryEnsureProtectionAsync(
             BrokerConnection connection,
             Trade trade,
@@ -1872,6 +2199,15 @@ namespace TradingBotEngine.Services
                         ? OrderSide.Sell
                         : OrderSide.Buy;
 
+                    var futuresTick = await TryGetFuturesTickSizeAsync(binance, trade.Symbol);
+                    if (futuresTick.HasValue)
+                    {
+                        if (trade.StopLoss.HasValue)
+                            trade.StopLoss = RoundToStep(trade.StopLoss.Value, futuresTick.Value);
+                        if (trade.TakeProfit.HasValue)
+                            trade.TakeProfit = RoundToStep(trade.TakeProfit.Value, futuresTick.Value);
+                    }
+
                     if (trade.StopLoss.HasValue && string.IsNullOrWhiteSpace(trade.StopLossOrderId))
                     {
                         var stop = await binance.UsdFuturesApi.Trading.PlaceOrderAsync(
@@ -1882,6 +2218,7 @@ namespace TradingBotEngine.Services
                         if (!stop.Success || stop.Data == null)
                         {
                             trade.ProtectionStatus = "ProtectionPending";
+                            trade.Reason = LimitLength($"Binance Futures stop-loss was not accepted: {stop.Error}", 480);
                             trade.UpdatedAt = DateTime.UtcNow;
                             await _context.SaveChangesAsync();
                             return false;
@@ -1902,6 +2239,7 @@ namespace TradingBotEngine.Services
                         if (!tp.Success || tp.Data == null)
                         {
                             trade.ProtectionStatus = "ProtectionPending";
+                            trade.Reason = LimitLength($"Binance Futures take-profit was not accepted: {tp.Error}", 480);
                             trade.UpdatedAt = DateTime.UtcNow;
                             await _context.SaveChangesAsync();
                             return false;
@@ -1950,20 +2288,52 @@ namespace TradingBotEngine.Services
                 if (!trade.StopLoss.HasValue || !trade.TakeProfit.HasValue)
                     return false;
 
+                // The exchange takes its fee from the bought asset, so the free balance
+                // can be slightly below the filled quantity. Protect what can be sold,
+                // rounded down to the lot size.
+                var protectQuantity = filledSpotQuantity;
+                var freeBase = await GetSpotAssetBalanceAsync(ExtractBaseAsset(trade.Symbol), connection);
+                if (freeBase > 0m && freeBase < protectQuantity)
+                    protectQuantity = freeBase;
+
+                var stepSize = await TryGetSpotStepSizeAsync(binance, trade.Symbol);
+                if (stepSize.HasValue)
+                    protectQuantity = RoundDownToStep(protectQuantity, stepSize.Value);
+
+                if (protectQuantity <= 0m)
+                {
+                    trade.ProtectionStatus = "ProtectionPending";
+                    trade.Reason = "Protection skipped: no sellable quantity after fees.";
+                    trade.UpdatedAt = DateTime.UtcNow;
+                    await _context.SaveChangesAsync();
+                    return false;
+                }
+
+                var tickSize = await TryGetSpotTickSizeAsync(binance, trade.Symbol);
+                if (tickSize.HasValue)
+                {
+                    trade.StopLoss = RoundToStep(trade.StopLoss.Value, tickSize.Value);
+                    trade.TakeProfit = RoundToStep(trade.TakeProfit.Value, tickSize.Value);
+                }
+
                 var oco = await binance.SpotApi.Trading.PlaceOcoOrderAsync(
-                    symbol: trade.Symbol, side: OrderSide.Sell, quantity: filledSpotQuantity,
+                    symbol: trade.Symbol, side: OrderSide.Sell, quantity: protectQuantity,
                     price: trade.TakeProfit.Value, stopPrice: trade.StopLoss.Value,
                     stopLimitPrice: trade.StopLoss.Value, stopLimitTimeInForce: TimeInForce.GoodTillCanceled);
 
                 if (!oco.Success || oco.Data == null)
                 {
+                    var ocoError = oco.Error?.ToString() ?? "no error detail returned";
                     trade.ProtectionStatus = "ProtectionPending";
-                    trade.Reason = "Binance Spot OCO protection was not accepted; reconciliation will retry.";
+                    trade.Reason = LimitLength(
+                        $"Binance Spot OCO protection was not accepted: {ocoError}", 480);
                     trade.UpdatedAt = DateTime.UtcNow;
                     _context.AuditLogs.Add(new AuditLog
                     {
                         UserId = trade.UserId, Action = "ProtectionOrdersPartialFailure",
-                        Details = $"Binance Spot OCO protection failed for trade {trade.Id}; recovery is required.",
+                        Details = $"Binance Spot OCO protection failed for trade {trade.Id} " +
+                                  $"(qty={protectQuantity}, SL={trade.StopLoss}, TP={trade.TakeProfit}, " +
+                                  $"tick={(tickSize.HasValue ? tickSize.Value.ToString() : "unknown")}): {ocoError}",
                         CreatedAt = DateTime.UtcNow
                     });
                     await _context.SaveChangesAsync();
@@ -2190,9 +2560,13 @@ namespace TradingBotEngine.Services
 
                 if (client is BybitRestClient bybit)
                 {
-                    var result = await bybit.V5Api.Account.GetBalancesAsync(Bybit.Net.Enums.AccountType.Spot, asset, CancellationToken.None);
+                    var result = await bybit.V5Api.Account.GetBalancesAsync(Bybit.Net.Enums.AccountType.Unified, asset, CancellationToken.None);
                     if (result.Success)
-                        return result.Data.List?.FirstOrDefault()?.Assets?.FirstOrDefault(a => a.Asset.Equals(asset, StringComparison.OrdinalIgnoreCase))?.Free ?? 0m;
+                    {
+                        var coin = result.Data.List?.FirstOrDefault()?.Assets?.FirstOrDefault(a => a.Asset.Equals(asset, StringComparison.OrdinalIgnoreCase));
+                        if (coin != null)
+                            return coin.Free ?? Math.Max(0m, coin.WalletBalance - (coin.Locked ?? 0m));
+                    }
                 }
             }
             catch { }
@@ -2562,9 +2936,7 @@ namespace TradingBotEngine.Services
                     new BybitRestClient(options =>
                     {
                         options.Environment =
-                            connection.IsTestnet
-                                ? BybitEnvironment.Testnet
-                                : BybitEnvironment.Live;
+                            BybitEnvironments.ForTrading(connection.IsTestnet);
                     });
 
                 client.SetApiCredentials(
