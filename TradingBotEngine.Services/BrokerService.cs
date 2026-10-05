@@ -123,8 +123,11 @@ namespace TradingBotEngine.Services
 
                 return connected;
             }
-            catch
+            catch (Exception connectException)
             {
+                Console.Error.WriteLine(
+                    $"[BrokerVerify] {persisted.BrokerName} connect threw: {connectException}");
+
                 persisted.IsConnected = false;
                 persisted.UpdatedAt = DateTime.UtcNow;
 
@@ -1061,14 +1064,61 @@ namespace TradingBotEngine.Services
                 leverage = 1m;
             }
 
-            var riskCapital =
-                balance * (riskSetting.RiskPerTrade / 100m);
+            decimal calculatedQuantity;
 
-            var targetNotional =
-                riskCapital * leverage;
+            if (stopLoss.HasValue && stopLoss.Value > 0m)
+            {
+                // The stop must sit on the loss side of the entry, otherwise the
+                // "risk" being sized is meaningless (or the exchange fires it at once).
+                var isBuyOrder = direction.Equals("BUY", StringComparison.OrdinalIgnoreCase);
 
-            var calculatedQuantity =
-                targetNotional / sizingPrice;
+                if ((isBuyOrder && stopLoss.Value >= sizingPrice) ||
+                    (!isBuyOrder && stopLoss.Value <= sizingPrice))
+                {
+                    return await AuditOrderFailureAsync(
+                        userId,
+                        "OrderValidationFailed",
+                        "Stop-loss is on the wrong side of the entry price.",
+                        $"Order for '{symbol}' was rejected: {direction.ToUpperInvariant()} stop-loss {stopLoss.Value} " +
+                        $"is not on the loss side of reference price {sizingPrice}.");
+                }
+
+                // Size so that being stopped out loses RiskPerTrade% of the balance:
+                //   quantity = (balance * risk%) / |entry - stop|, capped by leverage.
+                try
+                {
+                    calculatedQuantity = OrderRiskSizer.CalculateQuantity(
+                        balance: balance,
+                        riskPerTradePercent: riskSetting.RiskPerTrade,
+                        entryPrice: sizingPrice,
+                        stopLoss: stopLoss.Value,
+                        leverage: leverage,
+                        minQuantity: Math.Max(rules.MinQuantity, rules.QuantityStep),
+                        maxQuantity: rules.MaxQuantity > 0m ? rules.MaxQuantity : decimal.MaxValue,
+                        quantityStep: rules.QuantityStep);
+                }
+                catch (InvalidOperationException sizingException)
+                {
+                    return await AuditOrderFailureAsync(
+                        userId,
+                        "OrderValidationFailed",
+                        "Unable to size the order from the stop-loss risk.",
+                        $"Order for '{symbol}' was rejected by the stop-loss risk sizer: {sizingException.Message}");
+                }
+            }
+            else
+            {
+                // No stop-loss means the loss per trade is undefined, so risk-based sizing
+                // is impossible. Legacy fallback: RiskPerTrade% of balance as margin.
+                var riskCapital =
+                    balance * (riskSetting.RiskPerTrade / 100m);
+
+                var targetNotional =
+                    riskCapital * leverage;
+
+                calculatedQuantity =
+                    targetNotional / sizingPrice;
+            }
 
             // ---------------------------------------------------------
             // 4.9 FINAL QUANTITY VALIDATION
@@ -1322,6 +1372,11 @@ namespace TradingBotEngine.Services
             // SUBMIT ORDER TO EXCHANGE
             // ---------------------------------------------------------
 
+            // Deterministic exchange-side id derived from the idempotency key. If the
+            // response to the submit is lost, the order can still be found on the
+            // exchange by this id (see RecoverUnknownSubmissionsAsync).
+            var clientOrderId = BuildClientOrderId(userId, idempotencyKey);
+
             try
             {
                 var client = CreateClient(connection);
@@ -1366,6 +1421,7 @@ namespace TradingBotEngine.Services
 
                                     quantity: quantity,
                                     price: entryPrice,
+                                    newClientOrderId: clientOrderId,
                                     stopPrice: stopLoss);
 
                         if (!result.Success)
@@ -1493,7 +1549,8 @@ namespace TradingBotEngine.Services
                                 symbol: symbol,
                                 side: side,
                                 type: SpotOrderType.Market,
-                                quantity: quantity)
+                                quantity: quantity,
+                                newClientOrderId: clientOrderId)
                         : await binance
                             .SpotApi
                             .Trading
@@ -1503,6 +1560,7 @@ namespace TradingBotEngine.Services
                                 type: SpotOrderType.Limit,
                                 quantity: quantity,
                                 price: entryPrice,
+                                newClientOrderId: clientOrderId,
                                 timeInForce: TimeInForce.GoodTillCanceled);
 
                     if (!spot.Success)
@@ -1632,6 +1690,13 @@ namespace TradingBotEngine.Services
                             ? Bybit.Net.Enums.Category.Linear
                             : Bybit.Net.Enums.Category.Spot;
 
+                    // Bybit documents spot (and linear) TP/SL on create with an explicit
+                    // tpslMode. Without it, an order that carries stopLoss/takeProfit was
+                    // rejected on demo with 170003 "unknown parameter".
+                    Bybit.Net.Enums.StopLossTakeProfitMode? tpslMode = null;
+                    if (stopLoss.HasValue || takeProfit.HasValue)
+                        tpslMode = Bybit.Net.Enums.StopLossTakeProfitMode.Full;
+
                     var result =
                         await bybit
                             .V5Api
@@ -1651,8 +1716,10 @@ namespace TradingBotEngine.Services
 
                                 quantity: quantity,
                                 price: entryPrice,
+                                clientOrderId: clientOrderId,
                                 stopLoss: stopLoss,
-                                takeProfit: takeProfit);
+                                takeProfit: takeProfit,
+                                stopLossTakeProfitMode: tpslMode);
 
                     if (!result.Success)
                     {
@@ -1812,6 +1879,290 @@ namespace TradingBotEngine.Services
             }
         }
 
+
+        // ------------------------------------------------------------------
+        // UNKNOWN-SUBMISSION RECOVERY
+        // ------------------------------------------------------------------
+        // When an order submit throws (timeout, dropped connection) the exchange may
+        // still have accepted it. Every entry order carries a deterministic client
+        // order id, so we can ask the exchange "do you have this order?" and either
+        // adopt it (so reconciliation + protection take over) or, once we are sure it
+        // does not exist, release the slot it was holding.
+
+        // Binance and Bybit both accept 1-36 characters of [A-Za-z0-9_-].
+        public static string BuildClientOrderId(int userId, string idempotencyKey)
+        {
+            var hash = System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes($"{userId}:{idempotencyKey}"));
+
+            return "tb" + Convert.ToHexString(hash).Substring(0, 32).ToLowerInvariant();
+        }
+
+        private enum ExchangeLookupOutcome
+        {
+            Found,
+            NotFound,
+            Unknown
+        }
+
+        private sealed record ExchangeLookupResult(
+            ExchangeLookupOutcome Outcome,
+            string? ExchangeOrderId = null);
+
+        /// <summary>
+        /// Resolves trades stuck in PendingReconciliation that have no ExchangeOrder row.
+        /// Returns the number of trades resolved (adopted or released).
+        /// </summary>
+        public async Task<int> RecoverUnknownSubmissionsAsync(
+            int userId,
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+            var graceCutoff = now.AddSeconds(-45);
+            var releaseCutoff = now.AddMinutes(-5);
+
+            var candidates = await _context.Trades
+                .Where(t =>
+                    t.UserId == userId &&
+                    t.Status == "PendingReconciliation" &&
+                    t.IdempotencyKey != null &&
+                    (t.UpdatedAt ?? t.CreatedAt) < graceCutoff &&
+                    !_context.ExchangeOrders.Any(o => o.TradeId == t.Id))
+                .ToListAsync(cancellationToken);
+
+            var resolved = 0;
+
+            foreach (var trade in candidates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var clientOrderId = BuildClientOrderId(userId, trade.IdempotencyKey!);
+
+                // Bot trades know their market; manual trades could be spot or futures.
+                bool? botUsesFutures = null;
+                if (trade.BotId.HasValue)
+                {
+                    botUsesFutures = await _context.TradingBots
+                        .Where(b => b.Id == trade.BotId.Value)
+                        .Select(b => (bool?)b.UseFutures)
+                        .FirstOrDefaultAsync(cancellationToken);
+                }
+
+                var markets = botUsesFutures.HasValue
+                    ? new[] { botUsesFutures.Value }
+                    : new[] { false, true };
+
+                var connections = await _context.BrokerConnections
+                    .Where(b =>
+                        b.UserId == userId &&
+                        b.IsActive &&
+                        b.IsConnected &&
+                        b.BrokerName == trade.BrokerName)
+                    .OrderByDescending(b => b.LastConnectedAt)
+                    .ThenByDescending(b => b.Id)
+                    .ToListAsync(cancellationToken);
+
+                // "Not found" only counts once EVERY connection/market combination has
+                // answered with a definitive "no such order". Any error keeps the trade
+                // unresolved, because releasing a trade that really exists on the
+                // exchange would hide a live, possibly unprotected, position.
+                var everyLookupSaidNotFound = connections.Count > 0;
+                BrokerConnection? foundConnection = null;
+                bool foundFutures = false;
+                string? foundOrderId = null;
+
+                foreach (var connection in connections)
+                {
+                    foreach (var futures in markets)
+                    {
+                        var lookup = await LookupOrderByClientIdAsync(
+                            connection,
+                            trade.Symbol,
+                            futures,
+                            clientOrderId,
+                            cancellationToken);
+
+                        if (lookup.Outcome == ExchangeLookupOutcome.Found)
+                        {
+                            foundConnection = connection;
+                            foundFutures = futures;
+                            foundOrderId = lookup.ExchangeOrderId;
+                            break;
+                        }
+
+                        if (lookup.Outcome != ExchangeLookupOutcome.NotFound)
+                            everyLookupSaidNotFound = false;
+                    }
+
+                    if (foundConnection != null)
+                        break;
+                }
+
+                if (foundConnection != null && !string.IsNullOrWhiteSpace(foundOrderId))
+                {
+                    await PersistExchangeOrderAsync(
+                        userId,
+                        trade,
+                        foundConnection,
+                        foundOrderId,
+                        trade.Direction,
+                        "Recovered",
+                        foundFutures,
+                        "Entry",
+                        null);
+
+                    trade.OrderId = foundOrderId;
+                    trade.Status = "Pending"; // normal reconciliation now owns it
+                    trade.Reason = "Recovered from the exchange by client order id after an unknown submission result.";
+                    trade.UpdatedAt = DateTime.UtcNow;
+
+                    if ((trade.StopLoss.HasValue || trade.TakeProfit.HasValue) &&
+                        trade.BrokerName.Equals("Bybit", StringComparison.OrdinalIgnoreCase))
+                    {
+                        trade.ProtectionStatus = "ExchangeManaged";
+                    }
+
+                    _context.AuditLogs.Add(new AuditLog
+                    {
+                        UserId = userId,
+                        Action = "OrderSubmissionRecovered",
+                        Details =
+                            $"Trade {trade.Id} ({trade.Symbol}) had an unknown submission result. " +
+                            $"Found exchange order {foundOrderId} by client order id {clientOrderId}; " +
+                            "handed to reconciliation.",
+                        CreatedAt = DateTime.UtcNow
+                    });
+
+                    await _context.SaveChangesAsync(cancellationToken);
+                    resolved++;
+                    continue;
+                }
+
+                if (everyLookupSaidNotFound && (trade.UpdatedAt ?? trade.CreatedAt) < releaseCutoff)
+                {
+                    trade.Status = "Failed";
+                    trade.Reason =
+                        "Submission result was unknown and the exchange has no order for this trade's client order id; released automatically.";
+                    trade.UpdatedAt = DateTime.UtcNow;
+
+                    _context.AuditLogs.Add(new AuditLog
+                    {
+                        UserId = userId,
+                        Action = "OrderSubmissionReleased",
+                        Details =
+                            $"Trade {trade.Id} ({trade.Symbol}) was released: no exchange order exists " +
+                            $"for client order id {clientOrderId}.",
+                        CreatedAt = DateTime.UtcNow
+                    });
+
+                    await _context.SaveChangesAsync(cancellationToken);
+                    resolved++;
+                }
+            }
+
+            return resolved;
+        }
+
+        private async Task<ExchangeLookupResult> LookupOrderByClientIdAsync(
+            BrokerConnection connection,
+            string symbol,
+            bool useFutures,
+            string clientOrderId,
+            CancellationToken cancellationToken)
+        {
+            // Binance: "Order does not exist" is error code -2013.
+            const int binanceOrderDoesNotExist = -2013;
+
+            try
+            {
+                var client = CreateClient(connection);
+
+                if (client is BinanceRestClient binance)
+                {
+                    if (useFutures)
+                    {
+                        var futuresResult = await binance.UsdFuturesApi.Trading.GetOrderAsync(
+                            symbol,
+                            origClientOrderId: clientOrderId,
+                            ct: cancellationToken);
+
+                        if (futuresResult.Success && futuresResult.Data != null)
+                        {
+                            return new ExchangeLookupResult(
+                                ExchangeLookupOutcome.Found,
+                                futuresResult.Data.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        }
+
+                        return new ExchangeLookupResult(
+                            futuresResult.Error?.Code == binanceOrderDoesNotExist
+                                ? ExchangeLookupOutcome.NotFound
+                                : ExchangeLookupOutcome.Unknown);
+                    }
+
+                    var spotResult = await binance.SpotApi.Trading.GetOrderAsync(
+                        symbol,
+                        origClientOrderId: clientOrderId,
+                        ct: cancellationToken);
+
+                    if (spotResult.Success && spotResult.Data != null)
+                    {
+                        return new ExchangeLookupResult(
+                            ExchangeLookupOutcome.Found,
+                            spotResult.Data.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    }
+
+                    return new ExchangeLookupResult(
+                        spotResult.Error?.Code == binanceOrderDoesNotExist
+                            ? ExchangeLookupOutcome.NotFound
+                            : ExchangeLookupOutcome.Unknown);
+                }
+
+                if (client is BybitRestClient bybit)
+                {
+                    var category = useFutures
+                        ? Bybit.Net.Enums.Category.Linear
+                        : Bybit.Net.Enums.Category.Spot;
+
+                    // Real-time list (open + recently closed) and history can each lag,
+                    // so check both before declaring the order missing.
+                    var live = await bybit.V5Api.Trading.GetOrdersAsync(
+                        category: category,
+                        symbol: symbol,
+                        clientOrderId: clientOrderId,
+                        ct: cancellationToken);
+
+                    var liveHit = live.Success ? live.Data?.List?.FirstOrDefault() : null;
+                    if (liveHit != null && !string.IsNullOrWhiteSpace(liveHit.OrderId))
+                        return new ExchangeLookupResult(ExchangeLookupOutcome.Found, liveHit.OrderId);
+
+                    var history = await bybit.V5Api.Trading.GetOrderHistoryAsync(
+                        category: category,
+                        symbol: symbol,
+                        clientOrderId: clientOrderId,
+                        limit: useFutures ? 1 : (int?)null, // spot history has no limit key
+                        ct: cancellationToken);
+
+                    var historyHit = history.Success ? history.Data?.List?.FirstOrDefault() : null;
+                    if (historyHit != null && !string.IsNullOrWhiteSpace(historyHit.OrderId))
+                        return new ExchangeLookupResult(ExchangeLookupOutcome.Found, historyHit.OrderId);
+
+                    return new ExchangeLookupResult(
+                        live.Success && history.Success
+                            ? ExchangeLookupOutcome.NotFound
+                            : ExchangeLookupOutcome.Unknown);
+                }
+
+                return new ExchangeLookupResult(ExchangeLookupOutcome.Unknown);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return new ExchangeLookupResult(ExchangeLookupOutcome.Unknown);
+            }
+        }
 
         private static decimal RoundToStep(decimal value, decimal step) =>
             step <= 0m
@@ -2966,10 +3317,12 @@ namespace TradingBotEngine.Services
                     if (await VerifyConnectionAsync(client, connection))
                         return true;
                 }
-                catch when (attempt < maxAttempts)
+                catch (Exception verifyException) when (attempt < maxAttempts)
                 {
                     // Verification is a read-only operation, so retrying a
                     // transient DNS/network/API failure is safe.
+                    Console.Error.WriteLine(
+                        $"[BrokerVerify] attempt {attempt}/{maxAttempts} threw: {verifyException.Message}");
                 }
 
                 if (attempt < maxAttempts)
@@ -2995,6 +3348,12 @@ namespace TradingBotEngine.Services
                         .Account
                         .GetAccountInfoAsync();
 
+                if (!result.Success)
+                {
+                    Console.Error.WriteLine(
+                        $"[BrokerVerify] Binance verification failed (testnet={connection.IsTestnet}): {result.Error}");
+                }
+
                 return result.Success;
             }
 
@@ -3006,6 +3365,13 @@ namespace TradingBotEngine.Services
                         .Account
                         .GetMarginAccountInfoAsync(
                             CancellationToken.None);
+
+                if (!result.Success)
+                {
+                    Console.Error.WriteLine(
+                        $"[BrokerVerify] Bybit verification failed " +
+                        $"(testnet={connection.IsTestnet}, UseDemoTrading={BybitEnvironments.UseDemoTrading}): {result.Error}");
+                }
 
                 return result.Success;
             }

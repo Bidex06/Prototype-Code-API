@@ -124,23 +124,33 @@ namespace TradingBotEngine.Services
                         ? Bybit.Net.Enums.Category.Linear
                         : Bybit.Net.Enums.Category.Spot;
 
-                    var result = await bybit.V5Api.Trading.GetOrderHistoryAsync(
-                        category,
-                        order.Symbol,
-                        null,
-                        null,
-                        order.ExchangeOrderId,
-                        null,
-                        null,
-                        null,
-                        null,
-                        1,
-                        null,
-                        cancellationToken);
+                    // Look the order up by its EXCHANGE order id. Named arguments on purpose:
+                    // this call used to be positional and put the id in the clientOrderId slot,
+                    // so no Bybit order could ever be found. The real-time endpoint returns open
+                    // and recently closed orders; history covers older ones.
+                    var liveResult = await bybit.V5Api.Trading.GetOrdersAsync(
+                        category: category,
+                        symbol: order.Symbol,
+                        orderId: order.ExchangeOrderId,
+                        ct: cancellationToken);
 
-                    var exchangeOrder = result.Success
-                        ? result.Data?.List?.FirstOrDefault()
+                    var exchangeOrder = liveResult.Success
+                        ? liveResult.Data?.List?.FirstOrDefault()
                         : null;
+
+                    if (exchangeOrder == null)
+                    {
+                        var historyResult = await bybit.V5Api.Trading.GetOrderHistoryAsync(
+                            category: category,
+                            symbol: order.Symbol,
+                            orderId: order.ExchangeOrderId,
+                            limit: order.IsFutures ? 1 : (int?)null, // spot history has no limit key
+                            ct: cancellationToken);
+
+                        exchangeOrder = historyResult.Success
+                            ? historyResult.Data?.List?.FirstOrDefault()
+                            : null;
+                    }
 
                     if (exchangeOrder == null)
                         return await MarkReconciliationFailureAsync(order, "Bybit order lookup failed.", cancellationToken);

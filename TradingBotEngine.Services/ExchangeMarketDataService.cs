@@ -243,7 +243,11 @@ public sealed class ExchangeMarketDataService
         if (_cache.TryGetValue(key, out IReadOnlyList<MarketSymbol>? cached) && cached != null)
             return cached;
 
-        var baseUrl = isTestnet ? "https://api-testnet.bybit.com" : "https://api.bybit.com";
+        // Demo Trading uses live symbols and prices, so only the separate Bybit
+        // testnet site (UseDemoTrading off) has its own instrument list.
+        var baseUrl = (isTestnet && !BybitEnvironments.UseDemoTrading)
+            ? "https://api-testnet.bybit.com"
+            : "https://api.bybit.com";
         var category = useFutures ? "linear" : "spot";
         var symbols = new List<MarketSymbol>();
         string? cursor = null;

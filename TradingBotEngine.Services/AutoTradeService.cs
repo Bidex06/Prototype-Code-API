@@ -887,6 +887,54 @@ public sealed class AutoTradeService : BackgroundService
                 orphanTrades.Count);
         }
 
+        // Orders whose submit result was lost (timeout etc.) have no ExchangeOrder row,
+        // so the normal reconciliation below can never see them. Ask the exchange for
+        // them by client order id first; adopted orders then flow into the query below.
+        var unresolvedSubmissionUserIds = await db.Trades
+            .AsNoTracking()
+            .Where(t =>
+                t.Status == "PendingReconciliation" &&
+                !db.ExchangeOrders.Any(o => o.TradeId == t.Id))
+            .Select(t => t.UserId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        if (unresolvedSubmissionUserIds.Count > 0)
+        {
+            var brokerService = scope.ServiceProvider.GetRequiredService<BrokerService>();
+
+            foreach (var unresolvedUserId in unresolvedSubmissionUserIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    var recovered = await brokerService.RecoverUnknownSubmissionsAsync(
+                        unresolvedUserId,
+                        cancellationToken);
+
+                    if (recovered > 0)
+                    {
+                        _logger.LogWarning(
+                            "Resolved {Count} unknown order submission(s) for user {UserId}.",
+                            recovered,
+                            unresolvedUserId);
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "Unknown-submission recovery failed for user {UserId}; other users will continue.",
+                        unresolvedUserId);
+                }
+            }
+        }
+
         var protectionRetryCutoff = now.AddHours(-24);
 
         var userIds = await db.ExchangeOrders
